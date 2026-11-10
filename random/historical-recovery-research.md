@@ -123,8 +123,8 @@ Content-Type: application/json
 
 {
   "resources": ["myactivity.youtube"],
-  "start_time": "2023-01-01T00:00:00Z",
-  "end_time": "2023-12-31T23:59:59Z"
+  "startTime": "2023-01-01T00:00:00Z",
+  "endTime": "2023-12-31T23:59:59Z"
 }
 ```
 
@@ -183,3 +183,5 @@ The achievable outcome is a best-supported historical archive with explicit gaps
 **Follow-up on replay cases.** The corrected local-date samples show the website matching HTML's later Renegades timestamp and omitting JSON's earlier Radioactive occurrence. The two December website-only observations from the first sample are absent from a subsequent wider December paste, which instead shows the later same-video/UTC-day records retained by Takeout. This makes controlled query-window testing more important than a single full-history scroll; the exact filters and response payloads are not yet known. See the follow-up in [website findings](myactivity-website-findings.md).
 
 **End-date experiment confirmed in paired website samples.** The user's explicitly labelled December 7 versus December 8 cutoff queries reproduce the two disappearing December 7 occurrences and their replacement by later same-video occurrences on December 8 UTC. End-date-dependent visibility is now supported by that controlled comparison. Latest-qualifying-occurrence selection within video/UTC-day groups remains the best-fitting interpretation for these examples, not a verified universal backend contract. Recovery should test progressively earlier upper bounds rather than rely on one all-time result; sub-day bounds are still unverified.
+
+**Updated implementation decision after the time-picker limitation.** See [the focused next-step research](recovery-next-steps.md). Firsthand code establishes existing `min`/`max` microsecond URL parameters as a lead, and a 2026 forensic paper identifies `y3VFHd` as a My Activity history RPC. Neither source establishes complete repeat-one recovery. The next gate is a controlled sub-day filtering test, using [the browser link generator](myactivity-time-probes.js), followed by captured read-request replay if frontend date rounding interferes. A data-access request should proceed in parallel. Daily scraping alone does not meet the same-day repeat requirement; Data Portability remains conditional on eligibility and richer returned records.
