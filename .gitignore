@@ -223,6 +223,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Custom
+media/
 browser.json
 secret.py
 youtube_music_history.json
