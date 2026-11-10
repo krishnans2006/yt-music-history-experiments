@@ -1,5 +1,5 @@
 // Paste on your logged-in My Activity YouTube page, after pausing the old extractor.
-// Probe APIs fetches nine small historical queries without navigating/rendering pages.
+// Probe current route fetches three historical queries without navigating/rendering.
 (() => {
   'use strict';
   const READ_RPC = 'y3VFHd';
@@ -113,6 +113,16 @@
   function describe(data, lo, hi) {
     const videoURLs = [], timestampCandidates = [];
     function visit(value, path) {
+      // Observed My Activity timestamps use [epoch seconds, nanoseconds]. Keep
+      // the fraction: dropping it caused false negatives against narrow brackets.
+      if (Array.isArray(value) && value.length === 2 && value.every(Number.isSafeInteger) && value[1] >= 0 && value[1] < 1000000000) {
+        const nanoseconds = BigInt(value[0]) * 1000000000n + BigInt(value[1]);
+        if (nanoseconds >= BigInt(lo) * 1000000n && nanoseconds < BigInt(hi) * 1000000n) {
+          const utc = new Date(value[0] * 1000).toISOString().replace('.000Z', `.${String(value[1]).padStart(9, '0')}Z`);
+          timestampCandidates.push({ path, value, possibleUnit: 'seconds+nanoseconds', utc, epochNanoseconds: nanoseconds.toString() });
+          return;
+        }
+      }
       if (typeof value === 'string' && /^https:\/\/(?:music\.|www\.)?youtube\.com\/watch\?/.test(value)) {
         videoURLs.push({ path, url: value, videoId: new URL(value).searchParams.get('v') });
       }
@@ -132,13 +142,30 @@
     return { videoURLs, timestampCandidates, note: 'Candidates only. Query bounds and other metadata can resemble event timestamps; no event schema or play counts inferred.' };
   }
 
+  function serverWatchLinks(html) {
+    const text = html.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '');
+    const links = [];
+    const entities = value => value.replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&nbsp;/g, ' ');
+    for (const match of text.matchAll(/<a\b[^>]*\bhref\s*=\s*(["'])(.*?)\1[^>]*>/gi)) {
+      try {
+        const url = new URL(entities(match[2]), origin);
+        if (!['youtube.com', 'www.youtube.com', 'music.youtube.com'].includes(url.hostname) || url.pathname !== '/watch' || !url.searchParams.has('v')) continue;
+        const context = entities(text.slice(Math.max(0, match.index - 700), match.index + match[0].length + 700).replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
+        links.push({ videoId: url.searchParams.get('v'), url: url.href, context });
+      } catch { /* Not a usable watch URL. */ }
+    }
+    return links;
+  }
+
   function parseResponse(text, type, lo, hi) {
     if (/html/i.test(type) || /^\s*(?:<!doctype|<html)/i.test(text)) {
       const decoded = bootstrap(text);
       const activity = decoded.blocks.filter(block => /youtube|y3VFHd/i.test(JSON.stringify(block.data)));
       return { format: 'html-bootstrap', title: text.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1],
         bootstrapBlockCount: decoded.blocks.length, activityBlocks: activity, parseErrors: decoded.errors,
-        ...describe(activity, lo, hi) };
+        bootstrapInventory: decoded.blocks.map((block, index) => ({ index, key: block.key,
+          retained: activity.includes(block), ...describe(block.data, lo, hi) })),
+        serverWatchLinks: serverWatchLinks(text), ...describe(decoded.blocks, lo, hi) };
     }
     try {
       const data = JSON.parse(text.replace(/^\s*\)\]\}'[^\n]*\n?/, ''));
@@ -200,14 +227,14 @@
     });
     const matches = expected.map(event => ({ videoId: event.videoId, timeIntervalUTC: event.timeIntervalUTC,
       timestampCandidates: (candidates || []).filter(candidate => {
-        const time = Date.parse(candidate.utc);
-        return time >= Date.parse(event.timeIntervalUTC.start) && time < Date.parse(event.timeIntervalUTC.endExclusive);
+        const time = candidate.epochNanoseconds !== undefined ? BigInt(candidate.epochNanoseconds) : BigInt(Date.parse(candidate.utc)) * 1000000n;
+        return time >= BigInt(Date.parse(event.timeIntervalUTC.start)) * 1000000n && time < BigInt(Date.parse(event.timeIntervalUTC.endExclusive)) * 1000000n;
       }) }));
     return { expectedIntervals: expected.length, intervalsWithTimestampCandidates: matches.filter(match => match.timestampCandidates.length).length,
       matches, note: 'Interval matches are protocol evidence, not verified event/video associations. Numeric fields can be metadata; confirm the response schema before counting listens.' };
   }
 
-  const core = { OPTIONS, balanced, member, bootstrap, decodeBatch, readCalls, describe, parseResponse, probes, pool, sanitized, compareReference };
+  const core = { OPTIONS, balanced, member, bootstrap, decodeBatch, readCalls, describe, serverWatchLinks, parseResponse, probes, pool, sanitized, compareReference };
   if (typeof module === 'object' && module.exports) { module.exports = core; return; }
   if (location.origin !== origin) throw Error('Run this on My Activity.');
   if (window.myActivityNetwork) throw Error('The network tool is already installed.');
@@ -223,6 +250,7 @@
   panel.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;background:white;color:black;border:2px solid #555;padding:16px;font:14px sans-serif;max-width:420px;';
   const add = (tag, label) => { const e = document.createElement(tag); e.textContent = label; panel.append(e); return e; };
   add('strong', 'My Activity network benchmark');
+  const currentButton = add('button', 'Probe current route (3 reads)');
   const probeButton = add('button', 'Probe APIs (9 reads)');
   const replayButton = add('button', 'Replay captured history read'); replayButton.disabled = true;
   const stopButton = add('button', 'Stop');
@@ -381,7 +409,7 @@
     if (active) throw Error('A benchmark is already running.');
     if (!navigator.locks) throw Error('Web Locks support is required.');
     active = new AbortController(); const signal = active.signal;
-    probeButton.disabled = true; replayButton.disabled = true;
+    currentButton.disabled = true; probeButton.disabled = true; replayButton.disabled = true;
     try {
       await navigator.locks.request('yt-music-history-extractor', { ifAvailable: true }, async lock => {
         if (!lock) throw Error('Pause the old extractor first.');
@@ -435,7 +463,7 @@
           } finally { clearTimeout(timer); signal.removeEventListener('abort', abort); }
         }, signal);
       });
-    } finally { active = null; probeButton.disabled = halted; replayButton.disabled = halted || !template; }
+    } finally { active = null; currentButton.disabled = halted; probeButton.disabled = halted; replayButton.disabled = halted || !template; }
   }
 
   async function download() {
@@ -458,6 +486,9 @@
     { credentials: 'same-origin', redirect: 'error', cache: 'no-store' }), report.probes)
     .catch(error => { status.textContent = String(error); report.errors.push(String(error)); })
     .finally(download);
+  currentButton.onclick = () => runReads(probes(location.href).filter(item => item.variant === 'page'), item => new Request(item.url,
+    { credentials: 'same-origin', redirect: 'error', cache: 'no-store' }), report.probes)
+    .catch(error => { status.textContent = String(error); report.errors.push(String(error)); }).finally(download);
   replayButton.onclick = () => {
     if (!template) return;
     return runReads([{ label: 'captured-history-read', url: template.url }], () => template.clone(), report.replays)
@@ -482,7 +513,7 @@
     if (XMLHttpRequest.prototype.open === openWrapper) XMLHttpRequest.prototype.open = xhr.open;
     if (XMLHttpRequest.prototype.send === sendWrapper) XMLHttpRequest.prototype.send = xhr.send;
     if (XMLHttpRequest.prototype.setRequestHeader === headerWrapper) XMLHttpRequest.prototype.setRequestHeader = xhr.header;
-    probeButton.disabled = true; replayButton.disabled = true;
+    currentButton.disabled = true; probeButton.disabled = true; replayButton.disabled = true;
     status.textContent = 'Stopped. Network hooks restored; use Download JSON to save captured data.';
   };
   window.myActivityNetwork = { download, stop: stopButton.onclick };

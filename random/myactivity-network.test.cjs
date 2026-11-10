@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { bootstrap, decodeBatch, readCalls, describe, parseResponse, probes, pool, sanitized, compareReference } = require('./myactivity-network.js');
+const { bootstrap, decodeBatch, readCalls, describe, serverWatchLinks, parseResponse, probes, pool, sanitized, compareReference } = require('./myactivity-network.js');
 const payload = [['YouTube Music', 'https://music.youtube.com/watch?v=3Yb2-CWjrME', '1733544460123456']];
 const framed = JSON.stringify([['wrb.fr', 'y3VFHd', JSON.stringify(payload), null]]);
 
@@ -40,6 +40,32 @@ test('timestamp candidates retain paths and raw values without asserting an even
   assert.equal(result.timestampCandidates[0].possibleUnit, 'microseconds');
   assert.equal(result.timestampCandidates[0].value, '1733544460123456');
   assert.equal(result.timestampCandidates[0].path, '$[0][2]');
+});
+
+test('seconds/nanoseconds pairs preserve fractions and fix the broad-window false negative', () => {
+  const result = describe([[1733546200, 589956000]], 1733544000000, 1733546400000);
+  assert.equal(result.timestampCandidates.length, 1);
+  const candidate = result.timestampCandidates[0];
+  assert.equal(candidate.possibleUnit, 'seconds+nanoseconds');
+  assert.equal(candidate.utc, '2024-12-07T04:36:40.589956000Z');
+  assert.equal(candidate.epochNanoseconds, '1733546200589956000');
+  const reference = [{ videoId: '3Yb2-CWjrME', timeIntervalUTC: {
+    start: '2024-12-07T04:36:40.312Z', endExclusive: '2024-12-07T04:36:41.250Z',
+  } }];
+  assert.equal(compareReference(result.timestampCandidates, reference).intervalsWithTimestampCandidates, 1);
+  assert.equal(compareReference([{ utc: '2024-12-07T04:36:40.000Z' }], reference).intervalsWithTimestampCandidates, 0);
+});
+
+test('HTML diagnostics inspect all bootstrap blocks and static watch links without rendering', () => {
+  const html = '<html><script>AF_initDataCallback({key:"ds:0",data:[[1733546200,589956000]]});</script>' +
+    '<p>YouTube Music Watched</p><a href="https://music.youtube.com/watch?v=3Yb2-CWjrME&amp;feature=test">Radioactive</a></html>';
+  const parsed = parseResponse(html, 'text/html', 1733544000000, 1733546400000);
+  assert.equal(parsed.activityBlocks.length, 0); // no product strings in this block
+  assert.equal(parsed.bootstrapInventory.length, 1);
+  assert.equal(parsed.timestampCandidates.length, 1);
+  assert.equal(parsed.serverWatchLinks[0].videoId, '3Yb2-CWjrME');
+  assert.equal(parsed.serverWatchLinks[0].url.includes('&feature=test'), true);
+  assert.equal(serverWatchLinks('<script>const s=\'<a href="https://music.youtube.com/watch?v=not-a-real-link">\';</script>').length, 0);
 });
 
 test('probe matrix preserves account/product filters and includes legacy and current transports', () => {
@@ -123,4 +149,20 @@ test('completed Radioactive pilot supplies 12 reference events, with 3 in each n
   assert.equal(early.intervalsWithTimestampCandidates, 1);
   const middle = compareReference(knownExportTimestamps, events, { lo: Date.parse('2024-12-07T04:10Z'), hi: Date.parse('2024-12-07T04:20Z') });
   assert.equal(middle.expectedIntervals, 3);
+});
+
+const networkReport = path.resolve(__dirname, '../media/myactivity-network-report.json');
+test('real network report yields one corrected reference match in each successful probe', { skip: !fs.existsSync(networkReport) }, () => {
+  const report = JSON.parse(fs.readFileSync(networkReport, 'utf8'));
+  const successful = report.probes.filter(probe => probe.status === 200);
+  assert.equal(successful.length, 6);
+  for (const probe of successful) {
+    const lo = Number(BigInt(probe.endpoint.params.min) / 1000n);
+    const hi = Number((BigInt(probe.endpoint.params.max) + 1n) / 1000n);
+    const corrected = describe(probe.response.activityBlocks, lo, hi);
+    const comparison = compareReference(corrected.timestampCandidates, report.reference.events, { lo, hi });
+    assert.equal(comparison.intervalsWithTimestampCandidates, 1);
+    assert(corrected.timestampCandidates.every(candidate => candidate.possibleUnit === 'seconds+nanoseconds'));
+    assert.equal(corrected.videoURLs.length, 0); // product summaries alone are not song records
+  }
 });

@@ -129,6 +129,11 @@ function browser(mode = 'success') {
   const locked = browser('locked');
   await locked.button('Probe APIs (9 reads)').onclick();
   assert.equal(locked.fetches.length, 0);
+  const current = browser();
+  await current.button('Probe current route (3 reads)').onclick();
+  assert.equal(current.output.probes.length, 3);
+  assert(current.output.probes.every(probe => probe.status === 200));
+  assert.equal(current.fetches.filter(call => call.path === '/item').length, 0);
   const throttled = browser('throttled');
   await throttled.button('Probe APIs (9 reads)').onclick();
   assert(throttled.fetches.length < 10);
