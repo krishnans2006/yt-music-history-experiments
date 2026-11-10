@@ -457,10 +457,14 @@
             try { response = await fetch('/robots.txt', { credentials: 'omit', redirect: 'error', cache: 'no-store', signal: controller.signal }); }
             finally { clearTimeout(timeout); }
             if ([429, 503].includes(response.status)) await cooldown('robots.txt returned a traffic error.', retryAfter(response.headers.get('Retry-After'), Date.now()));
-            if (response.status !== 200) throw Error(`Cannot verify robots.txt (HTTP ${response.status}); automatic collection disabled.`);
-            const robotsText = await response.text();
+            // Missing robots files carry no rules. Do not parse a 404 HTML error
+            // page as robots directives, or treat access/server errors as absence.
+            const robotsAbsent = [404, 410].includes(response.status);
+            if (response.status !== 200 && !robotsAbsent) throw Error(`Cannot verify robots.txt (HTTP ${response.status}); automatic collection disabled.`);
+            const robotsText = robotsAbsent ? '' : await response.text();
             policy = robotsPolicy(robotsText);
-            run.robots = { checkedAt: iso(Date.now()), text: robotsText, delayMs: policy.delayMs };
+            run.robots = { checkedAt: iso(Date.now()), httpStatus: response.status, state: robotsAbsent ? 'absent' : 'present',
+              text: robotsAbsent ? null : robotsText, delayMs: policy.delayMs };
             if (!policy.allows(queryURL(run.baseURL, lo, hi))) throw Error('robots.txt disallows this history URL. Automatic collection disabled.');
             run.status = 'running';
             delete run.stopReason;

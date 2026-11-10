@@ -8,7 +8,7 @@ process.env.TZ = 'America/Chicago';
 const source = fs.readFileSync(process.argv[2] || path.join(__dirname, 'myactivity-extract.js'), 'utf8');
 async function browser(mode = 'success', fullPilot = false) {
   let clock = Date.parse('2026-11-10T12:00:00Z');
-  let fetched = 0, navigated = 0, exported;
+  let fetched = 0, navigated = 0, robotsBodiesRead = 0, exported;
   let didPause = false;
   const navigationTimes = [];
   const tables = { runs: new Map(), pages: new Map(), control: new Map() };
@@ -111,8 +111,12 @@ async function browser(mode = 'success', fullPilot = false) {
     window, document: doc, indexedDB, AbortController, Intl,
     crypto: { randomUUID }, location: { origin: 'https://myactivity.google.com', href: 'https://myactivity.google.com/product/youtube?restrict=youtube', pathname: '/product/youtube' },
     navigator: { locks: { async request(name, options, callback) { return callback(mode === 'locked' ? null : {}); } } },
-    fetch: async () => { fetched++; return { status: 200,
-      text: async () => mode === 'disallowed' ? 'User-agent: *\nDisallow: /' : 'User-agent: *\nAllow: /', headers: { get: () => null } }; },
+    fetch: async () => { fetched++; return { status: mode.startsWith('robots-') ? Number(mode.slice(7)) : 200,
+      text: async () => {
+        robotsBodiesRead++;
+        if (mode.startsWith('robots-')) return '<html>HTTP error page</html>';
+        return mode === 'disallowed' ? 'User-agent: *\nDisallow: /' : 'User-agent: *\nAllow: /';
+      }, headers: { get: () => null } }; },
     console: { log() {}, warn() {}, error(...args) { throw Error(args.map(String).join(' ')); } },
     setTimeout(callback, delay) {
       if (delay >= 15000) return 0;
@@ -134,7 +138,7 @@ async function browser(mode = 'success', fullPilot = false) {
     elements.find(e => e.tag === 'input' && e.value.startsWith('2024-12-07T04:40')).value = '2024-12-07T04:02:06Z';
   }
   await start.onclick();
-  return { tables, fetched, navigated, navigationTimes, get exported() { return exported; }, start, elements };
+  return { tables, fetched, navigated, navigationTimes, robotsBodiesRead, get exported() { return exported; }, start, elements };
 }
 (async () => {
   const success = await browser();
@@ -150,6 +154,23 @@ async function browser(mode = 'success', fullPilot = false) {
   assert.equal(denied.navigated, 0);
   assert.equal(denied.exported.run.pending.length, 4);
   assert.match(denied.exported.run.stopReason, /disallows/);
+  for (const status of [404, 410]) {
+    const absent = await browser(`robots-${status}`);
+    assert.equal(absent.exported.run.status, 'finished');
+    assert.equal(absent.navigated, 6);
+    assert.equal(absent.robotsBodiesRead, 0);
+    assert.equal(absent.exported.run.robots.httpStatus, status);
+    assert.equal(absent.exported.run.robots.state, 'absent');
+    assert.equal(absent.exported.run.robots.text, null);
+    assert.equal(absent.exported.events.length, 1);
+  }
+  for (const status of [401, 403, 429, 500, 503]) {
+    const blocked = await browser(`robots-${status}`);
+    assert.equal(blocked.navigated, 0);
+    assert.equal(blocked.exported.run.status, 'paused');
+    assert.match(blocked.exported.run.stopReason, new RegExp(`HTTP ${status}`));
+    if ([429, 503].includes(status)) assert(blocked.exported.rate.cooldownUntil);
+  }
   const locked = await browser('locked');
   assert.equal(locked.fetched, 0);
   assert.equal(locked.tables.runs.size, 0);
@@ -195,7 +216,7 @@ async function browser(mode = 'success', fullPilot = false) {
   assert(foreignBrowser.tables.control.get('rate').lastActionAt >= paused.exported.rate.lastActionAt);
   assert.equal(foreignBrowser.tables.control.get('rate').starts, undefined);
   assert.equal(foreignBrowser.fetched, 1); // importing performs no network access
-  console.log('Passed browser simulation: continuous paced extraction, calibration, leaf export, robots denial, cross-tab lock, HTTP 429 stop, pause/resume, and legacy checkpoint imports preserving cooldowns.');
+  console.log('Passed browser simulation: continuous paced extraction, calibration, leaf export, absent robots files, robots/access/server errors, cross-tab lock, HTTP 429 stop, pause/resume, and legacy checkpoint imports preserving cooldowns.');
 })().catch(error => { console.error(error); process.exitCode = 1; });
 
 function clonedForTest(value) { return structuredClone(value); }
