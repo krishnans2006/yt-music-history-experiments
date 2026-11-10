@@ -182,6 +182,8 @@ async function browser(mode = 'success', fullPilot = false) {
   assert.equal(uninterrupted.exported.run.status, 'finished');
   assert(uninterrupted.exported.run.completedQueries > 30);
   assert.equal(uninterrupted.exported.events.length, 5);
+  const eventStarts = uninterrupted.exported.events.map(event => event.timeIntervalUTC.start);
+  assert.deepEqual(eventStarts, [...eventStarts].sort());
   for (let i = 1; i < uninterrupted.navigationTimes.length; i++) {
     assert(uninterrupted.navigationTimes[i] - uninterrupted.navigationTimes[i-1] >= LIMITS.delayMs);
   }

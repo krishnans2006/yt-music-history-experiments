@@ -231,3 +231,4 @@ secret.py
 youtube_music_history.json
 myactivity-time-probes*.json
 myactivity-extract-*.json
+myactivity-network-report*.json

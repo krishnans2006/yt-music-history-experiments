@@ -244,7 +244,7 @@
       const events = pages.filter(p => p.leaf && p.terminal).flatMap(p => p.music.map((row, cardIndex) => ({
         ...row, queryId: p.id, cardIndex, timeIntervalUTC: { start: iso(p.lo), endExclusive: iso(p.hi) },
         timestampPrecision: 'interval; not an invented exact timestamp',
-      })));
+      }))).sort((a, b) => Date.parse(a.timeIntervalUTC.start) - Date.parse(b.timeIntervalUTC.start) || a.videoId.localeCompare(b.videoId) || a.cardIndex - b.cardIndex);
       const observationKey = row => JSON.stringify([row.videoId, row.displayDate, row.displayTime]);
       const resolved = new Set(events.map(observationKey));
       const unresolved = new Map();

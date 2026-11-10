@@ -109,3 +109,30 @@ Combining the supplied probes with the source exports now gives at least four di
 The five distinct Music video/minute observations from the eight probes, their query provenance, and their source-export matches are saved in `media/myactivity-time-probes-analysis.json`. Two of those five observations are additions to all three supplied exports. Neither those five observations nor the four-source-observation Radioactive union is a verified completed-play count.
 
 This elevates My Activity from a speculative supplementary route to the primary technical recovery route to implement. Arbitrary time selection already works through URL parameters for these tests, so request interception is not required merely to supply sub-day bounds. The next phase should automatically enumerate a small known repeat interval using progressively earlier bounds, obtain exact timestamps/event identifiers from Details or underlying responses where available, then scale up with checkpointing and explicit unresolved gaps. Do not advance by a whole minute when only the UI minute is known: that could skip additional events within that minute. Complete repeat-one coverage still requires checking what individual playback events were retained; these pages alone cannot establish loop mode or completed playback.
+
+**Completed 40-minute Radioactive extraction, November 10, 2026.** The user's `media/myactivity-extract-3c25205c-2491-43ae-8720-1f7bdc3eb20c.json` contains 12 separate Music observations of `3Yb2-CWjrME`, with no pending work or unresolved observations. All 196 queries reached terminal states; 3 are the Renegades calibrations and 193 cover the requested interval. Replaying the parser and the current split strategy against the saved responses reproduces the entire traversal. The final 97 empty/event intervals cover the whole range without gaps or overlap: 85 empty leaves and 12 positive leaves, each positive leaf 937–938 ms wide.
+
+All times below are on December 7, 2024 UTC, corresponding to December 6 evening in Chicago. Bounds are half-open; they are not invented exact timestamps.
+
+| Chicago display minute | UTC lower bound | UTC upper bound, exclusive | Primary Takeout observation |
+|---|---|---|---|
+| 22:02 | 04:02:03.750 | 04:02:04.687 | MyActivity JSON: 04:02:04.299 |
+| 22:05 | 04:05:12.187 | 04:05:13.125 | Neither |
+| 22:08 | 04:08:21.562 | 04:08:22.500 | Neither |
+| 22:11 | 04:11:30.000 | 04:11:30.937 | Neither |
+| 22:14 | 04:14:39.375 | 04:14:40.312 | Neither |
+| 22:17 | 04:17:47.812 | 04:17:48.750 | Neither |
+| 22:20 | 04:20:56.250 | 04:20:57.187 | Neither |
+| 22:24 | 04:24:05.625 | 04:24:06.562 | Neither |
+| 22:27 | 04:27:13.125 | 04:27:14.062 | Neither |
+| 22:30 | 04:30:22.500 | 04:30:23.437 | Neither |
+| 22:33 | 04:33:30.937 | 04:33:31.875 | Neither |
+| 22:36 | 04:36:40.312 | 04:36:41.250 | JSON: 04:36:40.589; HTML: 04:36:40 at whole-second precision |
+
+The two precise MyActivity JSON timestamps fall within the corresponding bounded observations. HTML's whole-second timestamp overlaps the final bracket when its lost fractional precision is respected; treating it as exactly `.000` would create a false discrepancy. The shorter watch-history JSON does not cover this historical interval. Thus this run adds **10 observations over the primary Takeout union**, or 8 beyond the four already known from the combined earlier website probes and exports.
+
+The displayed song duration is 3:07. The 11 gaps between interval midpoints average approximately **188.8 seconds (3:08.8)**, closely tracking the track length with a small inter-start overhead. This is strong evidence consistent with consecutive repeat-one playback being retained as separate activity observations. The service does not explicitly expose repeat-one mode or completed-play duration here; it does not prove universal loop retention across devices, dates or app states. Interval midpoints were used only to summarize gaps, not promoted to exact event times.
+
+Wall time was **32:50.465**, from 08:01:18.611 to 08:34:09.076 UTC on November 10, 2026. That is approximately 10.05 seconds per saved query, including the extractor's waits. It does not measure raw API latency. The history portion required approximately 16.1 queries per recovered observation, confirming that second-level subdivision is the main request-count cost. A direct raw-response method with native timestamps can potentially eliminate that cost; concurrency can be evaluated separately once the actual transport is measured.
+
+The detailed derived comparison is saved in `media/radioactive-pilot-analysis.json`. This file validates the UI recovery reference set, but supplies no raw network request/response bodies. The [network tool](myactivity-network.md) now accepts this completed export as a reference and compares timestamp candidates against the 12 known brackets. Inspect whether the broad payload contains all 12 observations or only the last one, and whether the early/middle payloads contain 3 observations or only their latest. That distinction determines whether fast extraction can paginate bulk events or must walk earlier cutoffs with exact timestamps.
