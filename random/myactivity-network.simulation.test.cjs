@@ -49,6 +49,18 @@ function browser(mode = 'success') {
     if (request.method === 'POST') texts.push(await request.text());
     if (u.pathname === '/robots.txt') return new Response(mode === 'denied' ? 'User-agent: *\nDisallow: /' : '', { status: mode === 'denied' ? 200 : 404 });
     if (mode === 'throttled') return new Response('Too many requests', { status: 429 });
+    if (mode.startsWith('cursor')) {
+      const minimum = BigInt(u.searchParams.get('min')) * 1000n;
+      const maximum = BigInt(u.searchParams.get('max')) * 1000n;
+      const pairs = [[1733543940, 0], [1733544124, 299000000], [1733544502, 120717000], [1733546200, 589956000]];
+      const values = pairs.map(pair => ({ pair, ns: BigInt(pair[0]) * 1000000000n + BigInt(pair[1]) }));
+      let selected = values.filter(value => value.ns <= maximum && (mode === 'cursor-lower-bound-summary' || value.ns >= minimum)).at(-1);
+      const latest = values.at(-1);
+      if (mode === 'cursor-no-progress' && selected && maximum < latest.ns) selected = latest;
+      if (mode === 'cursor-early-empty' && maximum < latest.ns) selected = null;
+      const data = selected ? [[[26, 'YouTube', 2, '', selected.pair]], 1] : [[], 1];
+      return new Response(`<html><script>AF_initDataCallback({key:'ds:5',data:${JSON.stringify(data)}});</script></html>`, { headers: { 'Content-Type': 'text/html' } });
+    }
     if (u.pathname.includes('batchexecute')) return new Response(")]}'\n" + JSON.stringify([['wrb.fr', 'y3VFHd', JSON.stringify(payload)]]), { headers: { 'Content-Type': 'application/json' } });
     if (u.pathname === '/other') return new Response('OK');
     if (u.pathname === '/item') return new Response('<html><title>Not found</title></html>', { status: 404, headers: { 'Content-Type': 'text/html' } });
@@ -134,10 +146,42 @@ function browser(mode = 'success') {
   assert.equal(current.output.probes.length, 3);
   assert(current.output.probes.every(probe => probe.status === 200));
   assert.equal(current.fetches.filter(call => call.path === '/item').length, 0);
+  const reference = {
+    run: { lo: Date.parse('2024-12-07T04:00Z'), hi: Date.parse('2024-12-07T04:40Z') },
+    coverage: { partitionComplete: true },
+    events: [
+      ['2024-12-07T04:02:03.750Z', '2024-12-07T04:02:04.687Z'],
+      ['2024-12-07T04:08:21.562Z', '2024-12-07T04:08:22.500Z'],
+      ['2024-12-07T04:36:40.312Z', '2024-12-07T04:36:41.250Z'],
+    ].map(([start, endExclusive]) => ({ videoId: '3Yb2-CWjrME', timeIntervalUTC: { start, endExclusive } })),
+    queries: [{ lo: Date.parse('2024-12-07T04:00Z'), hi: Date.parse('2024-12-07T04:01Z'), terminal: true, music: [], snapshots: [{ text: 'No results.' }] }],
+  };
+  for (const mode of ['cursor', 'cursor-lower-bound-summary', 'cursor-no-progress', 'cursor-early-empty']) {
+    const cursor = browser(mode);
+    cursor.referenceInput.files = [{ name: 'pilot.json', text: async () => JSON.stringify(reference) }];
+    await cursor.referenceInput.onchange();
+    assert.equal(cursor.button('Recover reference interval (fast)').disabled, false);
+    await cursor.button('Recover reference interval (fast)').onclick();
+    const result = cursor.output.cursor;
+    if (['cursor', 'cursor-lower-bound-summary'].includes(mode)) {
+      assert.equal(result.complete, true);
+      assert.equal(result.status, 'matched-reference');
+      assert.equal(result.observations.length, 3);
+      assert.equal(result.requests.length, 5);
+      assert.equal(result.emptyControlVerified, mode === 'cursor' ? 'summary-absent' : 'summary-before-lower-bound');
+      const maxima = result.requests.slice(1).map(request => BigInt(request.endpoint.params.max));
+      for (let i = 1; i < maxima.length; i++) assert(maxima[i] < maxima[i-1]);
+    } else {
+      assert.equal(result.complete, false);
+      assert.equal(result.status, 'stopped');
+      assert.equal(result.observations.length, 1);
+      assert(result.requests.length < 5);
+    }
+  }
   const throttled = browser('throttled');
   await throttled.button('Probe APIs (9 reads)').onclick();
   assert(throttled.fetches.length < 10);
   assert(throttled.storage.get('yt-music-history-network-cooldown'));
   assert.equal(throttled.button('Probe APIs (9 reads)').disabled, true);
-  console.log('Passed network browser simulation: direct fetch matrix, passive capture, credential-safe read replay, hook restoration, access rules, concurrency lock and throttle stop.');
+  console.log('Passed network browser simulation: direct fetch matrix, native cursor recovery/termination/failure cases, passive capture, read replay, hook restoration, access rules, concurrency lock and throttle stop.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

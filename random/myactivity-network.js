@@ -160,7 +160,7 @@
   function parseResponse(text, type, lo, hi) {
     if (/html/i.test(type) || /^\s*(?:<!doctype|<html)/i.test(text)) {
       const decoded = bootstrap(text);
-      const activity = decoded.blocks.filter(block => /youtube|y3VFHd/i.test(JSON.stringify(block.data)));
+      const activity = decoded.blocks.filter(block => block.key === 'ds:5' || /youtube|y3VFHd/i.test(JSON.stringify(block.data)));
       return { format: 'html-bootstrap', title: text.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1],
         bootstrapBlockCount: decoded.blocks.length, activityBlocks: activity, parseErrors: decoded.errors,
         bootstrapInventory: decoded.blocks.map((block, index) => ({ index, key: block.key,
@@ -234,7 +234,43 @@
       matches, note: 'Interval matches are protocol evidence, not verified event/video associations. Numeric fields can be metadata; confirm the response schema before counting listens.' };
   }
 
-  const core = { OPTIONS, balanced, member, bootstrap, decodeBatch, readCalls, describe, serverWatchLinks, parseResponse, probes, pool, sanitized, compareReference };
+  function productTimestamp(response) {
+    const block = response?.activityBlocks?.find(block => block.key === 'ds:5');
+    if (!block || !Array.isArray(block.data)) throw Error('The filtered product-summary block is missing.');
+    const rows = block.data[0];
+    if (rows == null) return null;
+    if (!Array.isArray(rows) || rows.some(row => !Array.isArray(row))) throw Error('Unrecognized product-summary structure.');
+    const youtube = rows.filter(row => row[0] === 26);
+    if (!youtube.length) return null;
+    if (youtube.length !== 1) throw Error('Multiple YouTube summaries; cursor semantics need review.');
+    const pair = youtube[0][4];
+    if (pair == null) return null;
+    if (!Array.isArray(pair) || pair.length !== 2 || !pair.every(Number.isSafeInteger) || pair[1] < 0 || pair[1] >= 1000000000) throw Error('Unrecognized native timestamp.');
+    if (pair[0] === 0 && pair[1] === 0) return null;
+    return { value: pair, epochNanoseconds: (BigInt(pair[0]) * 1000000000n + BigInt(pair[1])).toString(),
+      utc: new Date(pair[0] * 1000).toISOString().replace('.000Z', `.${String(pair[1]).padStart(9, '0')}Z`) };
+  }
+
+  function cursorStep(timestamp, minUs, maxUs, events, seen) {
+    const ns = timestamp === null ? null : BigInt(timestamp.epochNanoseconds);
+    if (ns === null || ns < BigInt(minUs) * 1000n) {
+      if (seen.length !== events.length) throw Error(`Cursor ended after ${seen.length}/${events.length} reference intervals.`);
+      return { complete: true, termination: ns === null ? 'summary-absent' : 'before-lower-bound' };
+    }
+    if (ns > BigInt(maxUs) * 1000n) throw Error('Summary time is outside the requested cursor bounds.');
+    const matches = events.map((event, index) => ({ event, index })).filter(({ event }) =>
+      ns >= BigInt(Date.parse(event.timeIntervalUTC.start)) * 1000000n && ns < BigInt(Date.parse(event.timeIntervalUTC.endExclusive)) * 1000000n);
+    if (matches.length !== 1) throw Error('Timestamp does not match exactly one known reference interval.');
+    const { event, index } = matches[0];
+    if (seen.includes(index)) throw Error('A reference interval returned more than one timestamp; review possible finer-grained events.');
+    // Largest whole-microsecond upper bound strictly below the native timestamp.
+    const nextMaxUs = ((ns - 1n) / 1000n).toString();
+    if (BigInt(nextMaxUs) >= BigInt(maxUs)) throw Error('Cursor did not move backward.');
+    return { complete: false, referenceIndex: index, referenceVideoId: event.videoId,
+      referenceInterval: event.timeIntervalUTC, nextMaxUs };
+  }
+
+  const core = { OPTIONS, balanced, member, bootstrap, decodeBatch, readCalls, describe, serverWatchLinks, parseResponse, probes, pool, sanitized, compareReference, productTimestamp, cursorStep };
   if (typeof module === 'object' && module.exports) { module.exports = core; return; }
   if (location.origin !== origin) throw Error('Run this on My Activity.');
   if (window.myActivityNetwork) throw Error('The network tool is already installed.');
@@ -250,6 +286,7 @@
   panel.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;background:white;color:black;border:2px solid #555;padding:16px;font:14px sans-serif;max-width:420px;';
   const add = (tag, label) => { const e = document.createElement(tag); e.textContent = label; panel.append(e); return e; };
   add('strong', 'My Activity network benchmark');
+  const cursorButton = add('button', 'Recover reference interval (fast)'); cursorButton.disabled = true;
   const currentButton = add('button', 'Probe current route (3 reads)');
   const probeButton = add('button', 'Probe APIs (9 reads)');
   const replayButton = add('button', 'Replay captured history read'); replayButton.disabled = true;
@@ -342,7 +379,7 @@
     const response = await originalFetch('/robots.txt', { credentials: 'omit', redirect: 'error', signal });
     report.robotsStatus = response.status;
     await httpError(response.status, response.headers.get('Retry-After'));
-    if ([404, 410].includes(response.status)) return { delay: OPTIONS.startGapMs };
+    if ([404, 410].includes(response.status)) return { delay: OPTIONS.startGapMs, assertAllowed() {} };
     if (response.status !== 200) throw Error(`Cannot check robots.txt: HTTP ${response.status}.`);
     const text = await response.text();
     if (/<(?:!doctype|html)\b/i.test(text)) throw Error('robots.txt is not a rules file.');
@@ -358,7 +395,8 @@
     }
     groups.push({ agents, rules });
     let delay = OPTIONS.startGapMs;
-    for (const group of groups.filter(g => g.agents.some(a => a === '*' || 'ytmusichistory'.includes(a)))) {
+    const applicable = groups.filter(g => g.agents.some(a => a === '*' || 'ytmusichistory'.includes(a)));
+    for (const group of applicable) {
       for (const rule of group.rules) {
         if (['allow', 'disallow'].includes(rule.key) && rule.value && !rule.value.startsWith('/')) throw Error('Invalid robots path.');
         if (rule.key === 'request-rate') throw Error('Request-rate directive needs review.');
@@ -367,7 +405,9 @@
           delay = Math.max(delay, Number(rule.value) * 1000);
         }
       }
-      for (const path of paths) {
+    }
+    const assertAllowed = path => {
+      for (const group of applicable) {
         const matches = group.rules.filter(rule => ['allow', 'disallow'].includes(rule.key) && rule.value).map(rule => {
           const anchored = rule.value.endsWith('$');
           const raw = anchored ? rule.value.slice(0, -1) : rule.value;
@@ -376,8 +416,9 @@
         }).filter(rule => rule.matches).sort((a,b) => b.length-a.length || (a.key === 'allow' ? -1 : 1));
         if (matches[0]?.key === 'disallow') throw Error(`robots.txt disallows ${path}.`);
       }
-    }
-    return { delay };
+    };
+    paths.forEach(assertAllowed);
+    return { delay, assertAllowed };
   }
 
   async function savedRate(update) {
@@ -404,12 +445,12 @@
     });
   }
 
-  async function runReads(items, makeRequest, destination) {
+  async function runReads(items, makeRequest, destination, afterRead) {
     if (halted) throw Error('A previous access/throttle error stopped the tool. Do not retry until it is resolved.');
     if (active) throw Error('A benchmark is already running.');
     if (!navigator.locks) throw Error('Web Locks support is required.');
     active = new AbortController(); const signal = active.signal;
-    currentButton.disabled = true; probeButton.disabled = true; replayButton.disabled = true;
+    cursorButton.disabled = true; referenceFile.disabled = true; currentButton.disabled = true; probeButton.disabled = true; replayButton.disabled = true;
     try {
       await navigator.locks.request('yt-music-history-extractor', { ifAvailable: true }, async lock => {
         if (!lock) throw Error('Pause the old extractor first.');
@@ -439,6 +480,7 @@
         }
         await pool(items, OPTIONS.concurrency, async item => {
           await paced();
+          const target = new URL(item.url); policy.assertAllowed(target.pathname + target.search);
           const result = { label: item.label || `${item.variant}/${item.window}`, endpoint: endpoint(item.url),
             startedAt: new Date().toISOString() };
           destination.push(result);
@@ -455,21 +497,22 @@
             result.durationMs = performance.now() - start;
             result.bytes = new TextEncoder().encode(text).length;
             result.response = parseResponse(text, response.headers.get('Content-Type') || '', item.lo ?? range.lo, item.hi ?? range.hi);
+            if (afterRead) await afterRead(result, item, items);
             status.textContent = `${destination.length}/${items.length} reads; last response ${Math.round(result.durationMs)}ms (${result.response.format}).`;
           } catch (error) {
             result.error = String(error); result.durationMs = performance.now() - start;
             // Unsupported legacy routes/undecodable responses are reported, not retried.
-            if (halted || controller.signal.aborted || signal.aborted) { active?.abort(); throw error; }
+            if (afterRead || halted || controller.signal.aborted || signal.aborted) { active?.abort(); throw error; }
           } finally { clearTimeout(timer); signal.removeEventListener('abort', abort); }
         }, signal);
       });
-    } finally { active = null; currentButton.disabled = halted; probeButton.disabled = halted; replayButton.disabled = halted || !template; }
+    } finally { active = null; referenceFile.disabled = false; cursorButton.disabled = halted || !report.reference?.emptyControl; currentButton.disabled = halted; probeButton.disabled = halted; replayButton.disabled = halted || !template; }
   }
 
   async function download() {
     await Promise.allSettled([...pending]);
     if (report.reference) {
-      for (const result of [...report.probes, ...report.captures, ...report.replays]) {
+      for (const result of [...report.probes, ...report.captures, ...report.replays, ...(report.cursor?.requests || [])]) {
         const params = result.endpoint?.params || {};
         const window = params.min && params.max ? { lo: Number(BigInt(params.min)) / 1000, hi: Number(BigInt(params.max) + 1n) / 1000 } : null;
         const candidates = result.response?.timestampCandidates || result.candidates?.timestampCandidates || [];
@@ -489,6 +532,49 @@
   currentButton.onclick = () => runReads(probes(location.href).filter(item => item.variant === 'page'), item => new Request(item.url,
     { credentials: 'same-origin', redirect: 'error', cache: 'no-store' }), report.probes)
     .catch(error => { status.textContent = String(error); report.errors.push(String(error)); }).finally(download);
+  cursorButton.onclick = async () => {
+    const reference = report.reference;
+    if (!reference?.emptyControl) { status.textContent = 'Load the completed 40-minute Radioactive export first.'; return; }
+    const cursor = report.cursor = { status: 'running', startedAt: new Date().toISOString(), expectedIntervals: reference.events.length,
+      sourceIdentity: 'Product-level YouTube timestamp; song/app identity comes only from the loaded reference.', requests: [], observations: [], complete: false };
+    const started = performance.now();
+    const minUs = (BigInt(range.lo) * 1000n).toString();
+    let maxUs = (BigInt(range.hi) * 1000n - 1n).toString();
+    const seen = [];
+    const task = (minimum, maximum, control = false) => {
+      const url = new URL(location.href);
+      url.searchParams.delete('jspb'); url.searchParams.set('min', minimum); url.searchParams.set('max', maximum);
+      return { url: url.href, label: control ? 'cursor/empty-control' : `cursor/${seen.length + 1}`, control, minUs: minimum, maxUs: maximum,
+        lo: Number(BigInt(minimum) / 1000n), hi: Number((BigInt(maximum) + 1000n) / 1000n) };
+    };
+    const control = reference.emptyControl;
+    const items = [task((BigInt(control.lo) * 1000n).toString(), (BigInt(control.hi) * 1000n - 1n).toString(), true)];
+    try {
+      // One dependent task at a time. Future independent windows can run in parallel.
+      await runReads(items, item => new Request(item.url, { credentials: 'same-origin', redirect: 'error', cache: 'no-store' }), cursor.requests,
+        (result, item, queue) => {
+          if (result.status !== 200) throw Error(`Cursor query HTTP ${result.status}.`);
+          const time = productTimestamp(result.response);
+          if (item.control) {
+            if (time !== null && BigInt(time.epochNanoseconds) >= BigInt(item.minUs) * 1000n) throw Error('The known empty interval returned a summary at/after its lower bound. Stop to inspect empty-result semantics.');
+            cursor.emptyControlVerified = time === null ? 'summary-absent' : 'summary-before-lower-bound';
+            queue.push(task(minUs, maxUs)); return;
+          }
+          const step = cursorStep(time, item.minUs, item.maxUs, reference.events, seen);
+          if (step.complete) { cursor.complete = true; cursor.status = 'matched-reference'; cursor.termination = step.termination; return; }
+          seen.push(step.referenceIndex);
+          cursor.observations.push({ timestamp: time, ...step });
+          maxUs = step.nextMaxUs;
+          if (BigInt(maxUs) < BigInt(minUs)) {
+            if (seen.length !== reference.events.length) throw Error('Cursor reached the lower bound before matching every reference interval.');
+            cursor.complete = true; cursor.status = 'matched-reference'; return;
+          }
+          queue.push(task(minUs, maxUs));
+        });
+      status.textContent = `Fast cursor matched ${seen.length}/${reference.events.length} intervals in ${Math.round((performance.now() - started) / 1000)}s.`;
+    } catch (error) { cursor.status = 'stopped'; cursor.error = String(error); status.textContent = String(error); report.errors.push(String(error)); }
+    finally { cursor.finishedAt = new Date().toISOString(); cursor.durationMs = performance.now() - started; await download(); }
+  };
   replayButton.onclick = () => {
     if (!template) return;
     return runReads([{ label: 'captured-history-read', url: template.url }], () => template.clone(), report.replays)
@@ -503,6 +589,13 @@
         typeof event.videoId === 'string' && Number.isFinite(Date.parse(event.timeIntervalUTC?.start)) &&
         Date.parse(event.timeIntervalUTC?.start) < Date.parse(event.timeIntervalUTC?.endExclusive))) throw Error('Select a valid extractor export with bounded events.');
       report.reference = { filename: file.name, events: data.events.map(event => ({ videoId: event.videoId, timeIntervalUTC: event.timeIntervalUTC })) };
+      if (data.coverage?.partitionComplete && data.run?.lo === range.lo && data.run?.hi === range.hi && data.events.every(event => event.videoId === '3Yb2-CWjrME')) {
+        const empty = (data.queries || []).filter(query => !query.kind && query.terminal && !query.music?.length &&
+          query.lo >= range.lo && query.hi <= range.hi && query.lo < query.hi && query.snapshots?.some(snapshot => snapshot.text.includes('No results.')))
+          .sort((a,b) => (b.hi-b.lo) - (a.hi-a.lo))[0];
+        if (empty) report.reference.emptyControl = { lo: empty.lo, hi: empty.hi };
+      }
+      cursorButton.disabled = halted || !report.reference.emptyControl;
       status.textContent = `Loaded ${report.reference.events.length} reference intervals. Probes/downloads will compare their timestamp candidates.`;
     } catch (error) { status.textContent = String(error); }
     finally { referenceFile.value = ''; }
@@ -513,7 +606,7 @@
     if (XMLHttpRequest.prototype.open === openWrapper) XMLHttpRequest.prototype.open = xhr.open;
     if (XMLHttpRequest.prototype.send === sendWrapper) XMLHttpRequest.prototype.send = xhr.send;
     if (XMLHttpRequest.prototype.setRequestHeader === headerWrapper) XMLHttpRequest.prototype.setRequestHeader = xhr.header;
-    currentButton.disabled = true; probeButton.disabled = true; replayButton.disabled = true;
+    cursorButton.disabled = true; currentButton.disabled = true; probeButton.disabled = true; replayButton.disabled = true;
     status.textContent = 'Stopped. Network hooks restored; use Download JSON to save captured data.';
   };
   window.myActivityNetwork = { download, stop: stopButton.onclick };

@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { bootstrap, decodeBatch, readCalls, describe, serverWatchLinks, parseResponse, probes, pool, sanitized, compareReference } = require('./myactivity-network.js');
+const { bootstrap, decodeBatch, readCalls, describe, serverWatchLinks, parseResponse, probes, pool, sanitized, compareReference, productTimestamp, cursorStep } = require('./myactivity-network.js');
 const payload = [['YouTube Music', 'https://music.youtube.com/watch?v=3Yb2-CWjrME', '1733544460123456']];
 const framed = JSON.stringify([['wrb.fr', 'y3VFHd', JSON.stringify(payload), null]]);
 
@@ -165,4 +165,27 @@ test('real network report yields one corrected reference match in each successfu
     assert(corrected.timestampCandidates.every(candidate => candidate.possibleUnit === 'seconds+nanoseconds'));
     assert.equal(corrected.videoURLs.length, 0); // product summaries alone are not song records
   }
+});
+
+test('native cursor excludes the last timestamp without losing nanosecond precision', () => {
+  const response = { activityBlocks: [{ key: 'ds:5', data: [[[26, 'YouTube', 2, '', [1733546200, 589956000]]], 1] }] };
+  const timestamp = productTimestamp(response);
+  assert.equal(timestamp.utc, '2024-12-07T04:36:40.589956000Z');
+  const events = [{ videoId: '3Yb2-CWjrME', timeIntervalUTC: { start: '2024-12-07T04:36:40.312Z', endExclusive: '2024-12-07T04:36:41.250Z' } }];
+  const step = cursorStep(timestamp, '1733544000000000', '1733546399999999', events, []);
+  assert.equal(step.nextMaxUs, '1733546200589955');
+  assert.equal(step.referenceIndex, 0);
+  assert.throws(() => cursorStep(timestamp, '1733544000000000', step.nextMaxUs, events, []), /outside/);
+  assert.throws(() => cursorStep(timestamp, '1733544000000000', '1733546399999999', events, [0]), /more than one/);
+  assert.throws(() => cursorStep(null, '1733544000000000', '1733546399999999', events, []), /0\/1/);
+  assert.equal(cursorStep(null, '1733544000000000', '1733546399999999', events, [0]).complete, true);
+  const submicro = { ...timestamp, epochNanoseconds: (BigInt(timestamp.epochNanoseconds) + 123n).toString() };
+  assert.equal(cursorStep(submicro, '1733544000000000', '1733546399999999', events, []).nextMaxUs, '1733546200589956');
+});
+
+test('empty filtered summaries are retained; missing/invalid timestamp structures stop', () => {
+  const parsed = parseResponse('<html><script>AF_initDataCallback({key:"ds:5",data:[[],1]});</script></html>', 'text/html', 1733544000000, 1733546400000);
+  assert.equal(productTimestamp(parsed), null);
+  assert.throws(() => productTimestamp({ activityBlocks: [] }), /missing/);
+  assert.throws(() => productTimestamp({ activityBlocks: [{ key: 'ds:5', data: [[[26, 'YouTube', 2, '', [1733546200, 1000000000]]], 1] }] }), /Unrecognized/);
 });
