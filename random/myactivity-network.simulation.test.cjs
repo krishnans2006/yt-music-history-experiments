@@ -19,7 +19,10 @@ function browser(mode = 'success') {
       append(...children) { this.children.push(...children); }, click() {}, remove() {}, setAttribute() {} };
     elements.push(e); return e;
   };
-  const document = { body: createElement('body'), createElement };
+  const document = { body: createElement('body'), createElement,
+    scrollingElement: { scrollHeight: 1000, scrollTop: 0 },
+    querySelectorAll: () => [{ href: 'https://music.youtube.com/watch?v=3Yb2-CWjrME', innerText: 'Radioactive' }] };
+  document.body.innerText = mode === 'live-warning' ? 'Verify your identity' : 'YouTube Music\nWatched Radioactive\nDetails';
   class Clock extends Date {
     constructor(...args) { super(...(args.length ? args : [now])); }
     static now() { return now; }
@@ -61,7 +64,21 @@ function browser(mode = 'success') {
       const data = selected ? [[[26, 'YouTube', 2, '', selected.pair]], 1] : [[], 1];
       return new Response(`<html><script>AF_initDataCallback({key:'ds:5',data:${JSON.stringify(data)}});</script></html>`, { headers: { 'Content-Type': 'text/html' } });
     }
+    if (mode.startsWith('historical') && u.pathname.includes('batchexecute')) {
+      const row = Array(33).fill(null);
+      row[4] = mode === 'historical-out-of-range' ? 1793307024778365 : 1733546200589956;
+      row[5] = 'independent-activity-id'; row[7] = ['YouTube Music'];
+      row[9] = ['Radioactive', null, 'Watched', 'https://music.youtube.com/watch?v=3Yb2-CWjrME'];
+      const frame = mode === 'historical-error-frame' ? [['er', 'y3VFHd', 'error']] : [['wrb.fr', 'y3VFHd', JSON.stringify([[row], null])]];
+      return new Response(")]}'\n" + JSON.stringify(frame), { headers: { 'Content-Type': 'application/json' } });
+    }
     if (u.pathname.includes('batchexecute')) return new Response(")]}'\n" + JSON.stringify([['wrb.fr', 'y3VFHd', JSON.stringify(payload)]]), { headers: { 'Content-Type': 'application/json' } });
+    if (mode.startsWith('historical')) {
+      // Synthetic observed map, deliberately not an assertion of Google's filter schema.
+      const args = mode === 'historical-unbounded' ? [[null, ['youtube']], null, 100] : [['fixture-time-filter', u.searchParams.get('min'), u.searchParams.get('max')], null, 100];
+      const script = mode === 'historical-missing-schema' ? '' : `<script>var AF_dataServiceRequests={'ds:4':{id:'y3VFHd',request:${JSON.stringify(args)}}};</script>`;
+      return new Response(`<html>${script}</html>`, { headers: { 'Content-Type': 'text/html' } });
+    }
     if (u.pathname === '/other') return new Response('OK');
     if (u.pathname === '/item') return new Response('<html><title>Not found</title></html>', { status: 404, headers: { 'Content-Type': 'text/html' } });
     if (u.searchParams.has('jspb')) return new Response(JSON.stringify(payload), { headers: { 'Content-Type': 'application/json' } });
@@ -73,7 +90,12 @@ function browser(mode = 'success') {
     return request;
   } };
   const context = {
-    window: { fetch: originalFetch }, document, location: { origin: root, pathname: '/product/youtube', href: root + '/product/youtube?restrict=youtube' },
+    window: { fetch: originalFetch, scrollTo() {
+      if (mode === 'live-capture') {
+        const body = new URLSearchParams({ at: secret, 'f.req': JSON.stringify([[['y3VFHd', '[]', null, 'generic']]]) }).toString();
+        context.window.fetch(new Request(rpc, { method: 'POST', body }));
+      }
+    } }, document, location: { origin: root, pathname: '/product/youtube', search: '?restrict=youtube', href: root + '/product/youtube?restrict=youtube' },
     navigator: { locks: { request: async (name, opts, callback) => callback(mode === 'locked' ? null : {}) } },
     XMLHttpRequest: XHR, Request, Response, Headers, URLSearchParams, TextEncoder, AbortController, indexedDB,
     localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
@@ -146,6 +168,40 @@ function browser(mode = 'success') {
   assert.equal(current.output.probes.length, 3);
   assert(current.output.probes.every(probe => probe.status === 200));
   assert.equal(current.fetches.filter(call => call.path === '/item').length, 0);
+  const live = browser('live-capture');
+  await live.button('Capture live history request').onclick();
+  assert.equal(live.output.liveCapture.status, 'captured-read');
+  assert.equal(live.output.liveCapture.scrollActions, 1);
+  assert.equal(live.output.captures.length, 1);
+  assert.equal(live.output.liveCapture.renderedSnapshot.watchLinks[0].videoId, '3Yb2-CWjrME');
+  const noRead = browser('live-no-request');
+  await noRead.button('Capture live history request').onclick();
+  assert.equal(noRead.output.liveCapture.status, 'no-supported-read');
+  assert.equal(noRead.output.liveCapture.scrollActions, 3);
+  const warning = browser('live-warning');
+  await warning.button('Capture live history request').onclick();
+  assert.equal(warning.output.liveCapture.status, 'stopped');
+  assert.equal(warning.output.liveCapture.scrollActions, 0);
+  for (const [mode, expected] of [
+    ['historical-success', 'historical-records-received'],
+    ['historical-out-of-range', 'stopped'], ['historical-error-frame', 'stopped'],
+    ['historical-missing-schema', 'stopped'], ['historical-unbounded', 'stopped'],
+  ]) {
+    const h = browser(mode);
+    const form = new URLSearchParams({ at: secret, 'f.req': JSON.stringify([[['y3VFHd', '[[null,["youtube"]],"captured-continuation",100]', null, 'generic']]]) });
+    await h.context.window.fetch(new Request(rpc, { method: 'POST', body: form }));
+    await new Promise(setImmediate);
+    await h.button('Probe historical records').onclick();
+    assert.equal(h.output.historicalRecords.status, expected, mode);
+    assert.equal(h.output.historicalRecords.requests.length, mode === 'historical-missing-schema' || mode === 'historical-unbounded' ? 1 : 2);
+    assert.equal(JSON.stringify(h.output).includes(secret), false);
+    if (mode === 'historical-success') {
+      assert.equal(h.output.historicalRecords.page.events[0].videoId, '3Yb2-CWjrME');
+      assert.equal(h.output.historicalRecords.repeatRecoveryValidated, false);
+      assert.equal(new URLSearchParams(h.texts.at(-1)).get('at'), secret);
+      assert.equal(h.output.captures[0].historyPages[0].musicCount, 1);
+    }
+  }
   const reference = {
     run: { lo: Date.parse('2024-12-07T04:00Z'), hi: Date.parse('2024-12-07T04:40Z') },
     coverage: { partitionComplete: true },
@@ -183,5 +239,5 @@ function browser(mode = 'success') {
   assert(throttled.fetches.length < 10);
   assert(throttled.storage.get('yt-music-history-network-cooldown'));
   assert.equal(throttled.button('Probe APIs (9 reads)').disabled, true);
-  console.log('Passed network browser simulation: direct fetch matrix, native cursor recovery/termination/failure cases, passive capture, read replay, hook restoration, access rules, concurrency lock and throttle stop.');
+  console.log('Passed network browser simulation: native cursor, live UI request capture, capture failure/warning stops, direct fetches, read replay, hook restoration, access rules and throttle stop.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

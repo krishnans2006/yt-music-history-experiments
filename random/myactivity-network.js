@@ -110,6 +110,75 @@
     return { calls, at: form.get('at') };
   }
 
+  // These positions come from the captured live y3VFHd response, not a guessed API.
+  function historyPage(payload) {
+    if (!Array.isArray(payload) || payload.length !== 2 ||
+        !(payload[0] === null || Array.isArray(payload[0])) ||
+        !(payload[1] == null || typeof payload[1] === 'string')) throw Error('Unrecognized history-page envelope.');
+    const events = [], excluded = [], rows = payload[0] || [];
+    for (const [index, row] of rows.entries()) {
+      if (!Array.isArray(row) || !Number.isSafeInteger(row[4]) || row[4] <= 0 ||
+          typeof row[5] !== 'string' || !row[5] || !Array.isArray(row[9])) throw Error(`Unrecognized history row ${index}.`);
+      const label = row[7]?.[0], secondaryLabel = row[18]?.[0];
+      const [title, , action, url] = row[9];
+      const us = BigInt(row[4]);
+      const timeUTC = new Date(Number(us / 1000n)).toISOString().replace(/\.\d{3}Z$/, `.${(us % 1000000n).toString().padStart(6, '0')}Z`);
+      let videoId = null, hostname = null;
+      try {
+        const parsed = new URL(url); hostname = parsed.hostname;
+        if (parsed.protocol === 'https:' && ['music.youtube.com', 'www.youtube.com', 'youtube.com'].includes(hostname) && parsed.pathname === '/watch') videoId = parsed.searchParams.get('v');
+      } catch { /* Retain explicit Music rows even if their media URL is unavailable. */ }
+      const isMusic = label === 'YouTube Music' || secondaryLabel === 'YouTube Music' || hostname === 'music.youtube.com';
+      if (!isMusic || action !== 'Watched') { excluded.push({ index, label, action }); continue; }
+      events.push({ source: 'myactivity-y3VFHd', sourceRow: index, eventId: row[5],
+        timestampMicroseconds: us.toString(), timeUTC, videoId, title, url: url || null,
+        app: 'YouTube Music', appEvidence: { label, secondaryLabel, hostname },
+        durationLabel: row[23]?.[1] || null,
+        channels: (row[32] || []).map(channel => ({ name: channel[1], url: channel[3] })),
+        devices: (row[19] || []).map(device => device[0]) });
+    }
+    // Do not merge by recording, day, or displayed minute: separate activity IDs survive.
+    return { rowCount: rows.length, musicCount: events.length, events, excluded,
+      continuation: payload[1] || null, exhausted: !payload[1] };
+  }
+
+  // Initial RPC arguments can be embedded in Google's declarative request map.
+  // Decode literal arrays only; never evaluate downloaded JavaScript.
+  function historyRequests(html) {
+    const requests = [];
+    for (const script of html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi)) {
+      const pattern = /\bAF_dataServiceRequests\s*=\s*\{/g;
+      let match;
+      while ((match = pattern.exec(script[1]))) {
+        const object = balanced(script[1], script[1].indexOf('{', match.index));
+        pattern.lastIndex = object.end;
+        const keys = new Set([...object.text.matchAll(/["'](ds:\d+)["']\s*:/g)].map(value => value[1]));
+        for (const key of keys) {
+          const spec = member(object.text, key);
+          if (!spec?.startsWith('{')) continue;
+          const id = member(spec, 'id');
+          if (!id || id.slice(1, -1) !== READ_RPC) continue;
+          const raw = member(spec, 'request');
+          if (!raw) throw Error('History request has no literal arguments.');
+          const args = JSON.parse(raw);
+          if (!Array.isArray(args)) throw Error('History request arguments are not an array.');
+          requests.push({ key, rpc: READ_RPC, arguments: args });
+        }
+      }
+    }
+    return requests;
+  }
+
+  async function historyRequest(template, args) {
+    const read = readCalls(await template.clone().text());
+    if (!read || read.calls.length !== 1 || template.method !== 'POST') throw Error('A single captured history POST is required.');
+    const form = new URLSearchParams(await template.clone().text());
+    const call = [...read.calls[0]]; call[1] = JSON.stringify(args);
+    form.set('f.req', JSON.stringify([[call]]));
+    const headers = new Headers(template.headers); headers.delete('content-length');
+    return new Request(template.url, { method: 'POST', headers, body: form.toString(), credentials: 'same-origin', redirect: 'error' });
+  }
+
   function describe(data, lo, hi) {
     const videoURLs = [], timestampCandidates = [];
     function visit(value, path) {
@@ -165,7 +234,7 @@
         bootstrapBlockCount: decoded.blocks.length, activityBlocks: activity, parseErrors: decoded.errors,
         bootstrapInventory: decoded.blocks.map((block, index) => ({ index, key: block.key,
           retained: activity.includes(block), ...describe(block.data, lo, hi) })),
-        serverWatchLinks: serverWatchLinks(text), ...describe(decoded.blocks, lo, hi) };
+        serverWatchLinks: serverWatchLinks(text), historyRequests: historyRequests(text), ...describe(decoded.blocks, lo, hi) };
     }
     try {
       const data = JSON.parse(text.replace(/^\s*\)\]\}'[^\n]*\n?/, ''));
@@ -206,6 +275,15 @@
     }));
     if (failed) throw failed;
     if (signal?.aborted) throw Error('Stopped.');
+  }
+
+  function waitFor(ms, signal) {
+    return new Promise((resolve, reject) => {
+      const abort = () => { clearTimeout(timer); reject(Error('Stopped.')); };
+      const timer = setTimeout(() => { signal?.removeEventListener('abort', abort); resolve(); }, ms);
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) abort();
+    });
   }
 
   function sanitized(value, secrets = []) {
@@ -270,7 +348,7 @@
       referenceInterval: event.timeIntervalUTC, nextMaxUs };
   }
 
-  const core = { OPTIONS, balanced, member, bootstrap, decodeBatch, readCalls, describe, serverWatchLinks, parseResponse, probes, pool, sanitized, compareReference, productTimestamp, cursorStep };
+  const core = { OPTIONS, balanced, member, bootstrap, decodeBatch, readCalls, historyPage, historyRequests, historyRequest, describe, serverWatchLinks, parseResponse, probes, pool, sanitized, compareReference, productTimestamp, cursorStep };
   if (typeof module === 'object' && module.exports) { module.exports = core; return; }
   if (location.origin !== origin) throw Error('Run this on My Activity.');
   if (window.myActivityNetwork) throw Error('The network tool is already installed.');
@@ -287,6 +365,8 @@
   const add = (tag, label) => { const e = document.createElement(tag); e.textContent = label; panel.append(e); return e; };
   add('strong', 'My Activity network benchmark');
   const cursorButton = add('button', 'Recover reference interval (fast)'); cursorButton.disabled = true;
+  const captureButton = add('button', 'Capture live history request');
+  const historyButton = add('button', 'Probe historical records');
   const currentButton = add('button', 'Probe current route (3 reads)');
   const probeButton = add('button', 'Probe APIs (9 reads)');
   const replayButton = add('button', 'Replay captured history read'); replayButton.disabled = true;
@@ -297,6 +377,12 @@
   const status = add('p', 'Listening for history read requests. Probes use fetch, not page navigation.');
   document.body.append(panel);
   const range = { lo: Date.parse('2024-12-07T04:00Z'), hi: Date.parse('2024-12-07T04:40Z') };
+  function busyControls(busy) {
+    referenceFile.disabled = busy;
+    cursorButton.disabled = busy || halted || !report.reference?.emptyControl;
+    captureButton.disabled = historyButton.disabled = currentButton.disabled = probeButton.disabled = busy || halted;
+    replayButton.disabled = busy || halted || !template;
+  }
 
   function endpoint(url) {
     const u = new URL(url, location.href);
@@ -304,7 +390,15 @@
     return { path: u.pathname, params: Object.fromEntries([...u.searchParams].filter(([key]) => allowed.includes(key))) };
   }
   function isBatch(url) { const u = new URL(url, location.href); return u.origin === origin && u.pathname === RPC_PATH; }
-  function track(promise) { pending.add(promise); promise.catch(error => report.errors.push(String(error))).finally(() => pending.delete(promise)); }
+  function track(promise) {
+    let timer;
+    const bounded = new Promise((resolve, reject) => {
+      timer = setTimeout(() => reject(Error('History request capture timed out.')), OPTIONS.timeoutMs);
+      Promise.resolve(promise).then(resolve, reject);
+    });
+    pending.add(bounded);
+    bounded.catch(error => report.errors.push(String(error))).finally(() => { clearTimeout(timer); pending.delete(bounded); });
+  }
   async function httpError(statusCode, retry = null) {
     if ([401, 403, 429].includes(statusCode) || statusCode >= 500) {
       halted = true; active?.abort();
@@ -329,7 +423,11 @@
         try { return { rpc: call[0], arguments: JSON.parse(call[1]) }; }
         catch { return { rpc: call[0], arguments: call[1] }; }
       });
-      try { record.response = decodeBatch(text); record.candidates = describe(record.response.payloads, range.lo, range.hi); }
+      try {
+        record.response = decodeBatch(text); record.candidates = describe(record.response.payloads, range.lo, range.hi);
+        try { record.historyPages = record.response.payloads.map(historyPage); }
+        catch (error) { record.historyParseError = String(error); }
+      }
       catch (error) { record.parseError = String(error); }
       if (statusCode === 200 && !halted) { template = request.clone(); replayButton.disabled = false; }
     } else record.metadataOnly = true;
@@ -349,10 +447,9 @@
       if (recording && isBatch(url)) request = new Request(input instanceof Request ? input.clone() : input, init);
     } catch (error) { report.errors.push(`Capture skipped: ${error}`); }
     const start = performance.now();
-    return originalFetch.call(this, input, init).then(response => {
-      if (recording && request) track(safeRecord(request, response, start));
-      return response;
-    });
+    const response = originalFetch.call(this, input, init);
+    if (recording && request) track(response.then(result => safeRecord(request, result, start)));
+    return response;
   };
   window.fetch = fetchWrapper;
   function openWrapper(method, url, ...rest) { metadata.set(this, { method, url: new URL(url, location.href).href, headers: [] }); return xhr.open.call(this, method, url, ...rest); }
@@ -363,9 +460,12 @@
       const start = performance.now();
       try {
         const request = new Request(m.url, { method: m.method, headers: m.headers, body, credentials: 'same-origin' });
-        this.addEventListener('loadend', () => {
-          if (!this.responseType || this.responseType === 'text') track(record(request, this.responseText, this.status, performance.now() - start));
-        }, { once: true });
+        track(new Promise((resolve, reject) => this.addEventListener('loadend', () => {
+          try {
+            if (!this.responseType || this.responseType === 'text') Promise.resolve(record(request, this.responseText, this.status, performance.now() - start)).then(resolve, reject);
+            else resolve();
+          } catch (error) { reject(error); }
+        }, { once: true })));
       } catch (error) { report.errors.push(`Capture skipped: ${error}`); }
     }
     return xhr.send.call(this, body);
@@ -450,7 +550,7 @@
     if (active) throw Error('A benchmark is already running.');
     if (!navigator.locks) throw Error('Web Locks support is required.');
     active = new AbortController(); const signal = active.signal;
-    cursorButton.disabled = true; referenceFile.disabled = true; currentButton.disabled = true; probeButton.disabled = true; replayButton.disabled = true;
+    busyControls(true);
     try {
       await navigator.locks.request('yt-music-history-extractor', { ifAvailable: true }, async lock => {
         if (!lock) throw Error('Pause the old extractor first.');
@@ -466,12 +566,7 @@
         function paced() {
           const turn = gate.then(async () => {
             const wait = Math.max(0, lastStart + policy.delay - Date.now());
-            if (wait) await new Promise((resolve, reject) => {
-              const abort = () => { clearTimeout(timer); reject(Error('Stopped.')); };
-              const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, wait);
-              signal.addEventListener('abort', abort, { once: true });
-              if (signal.aborted) abort();
-            });
+            if (wait) await waitFor(wait, signal);
             if (signal.aborted) throw Error('Stopped.');
             lastStart = Date.now();
             await savedRate(rate => ({ ...rate, lastActionAt: lastStart }));
@@ -489,7 +584,7 @@
           const timer = setTimeout(() => controller.abort(), OPTIONS.timeoutMs);
           const start = performance.now();
           try {
-            const request = makeRequest(item);
+            const request = await makeRequest(item);
             const response = await originalFetch(request, { signal: controller.signal });
             result.status = response.status;
             await httpError(response.status, response.headers.get('Retry-After'));
@@ -506,7 +601,7 @@
           } finally { clearTimeout(timer); signal.removeEventListener('abort', abort); }
         }, signal);
       });
-    } finally { active = null; referenceFile.disabled = false; cursorButton.disabled = halted || !report.reference?.emptyControl; currentButton.disabled = halted; probeButton.disabled = halted; replayButton.disabled = halted || !template; }
+    } finally { active = null; busyControls(false); }
   }
 
   async function download() {
@@ -581,6 +676,95 @@
       .catch(error => { status.textContent = String(error); report.errors.push(String(error)); }).finally(download);
   };
   downloadButton.onclick = download;
+  captureButton.onclick = async () => {
+    if (active || halted) return;
+    active = new AbortController(); const signal = active.signal;
+    busyControls(true);
+    const before = report.captures.length;
+    const capture = report.liveCapture = { startedAt: new Date().toISOString(), status: 'running', scrollActions: 0 };
+    try {
+      if (!navigator.locks) throw Error('Web Locks support is required.');
+      await navigator.locks.request('yt-music-history-extractor', { ifAvailable: true }, async lock => {
+        if (!lock) throw Error('Pause the old extractor first.');
+        const rate = await savedRate();
+        const cooldown = Math.max(rate?.cooldownUntil || 0, Number(localStorage.getItem('yt-music-history-network-cooldown')) || 0);
+        if (cooldown > Date.now()) throw Error(`Existing throttle cooldown until ${new Date(cooldown).toISOString()}.`);
+        const timer = setTimeout(() => active?.abort(), OPTIONS.timeoutMs);
+        let policy;
+        try { policy = await accessPolicy([location.pathname + location.search, RPC_PATH], signal); }
+        finally { clearTimeout(timer); }
+        for (let i = 0; i < 3; i++) {
+          if (signal.aborted) throw Error('Stopped.');
+          const text = document.body.innerText || '';
+          if (/unusual traffic|too many requests|verify (?:your identity|it.s you|you are human)|captcha|access denied|something went wrong/i.test(text)) throw Error('Page warning or verification detected. Stopped.');
+          await waitFor(policy.delay, signal);
+          await savedRate(rate => ({ ...rate, lastActionAt: Date.now() }));
+          const scroller = document.scrollingElement || document.documentElement;
+          window.scrollTo(0, scroller.scrollHeight); scroller.scrollTop = scroller.scrollHeight;
+          capture.scrollActions++;
+          status.textContent = `Waiting for the site's history request (${capture.scrollActions}/3 scrolls)…`;
+          await waitFor(2500, signal);
+          await Promise.allSettled([...pending]);
+          if (report.captures.length > before && template) break;
+        }
+        capture.batchCapturesAdded = report.captures.length - before;
+        capture.supportedHistoryReadCaptured = Boolean(template);
+        capture.status = template ? 'captured-read' : 'no-supported-read';
+        capture.renderedSnapshot = { text: (document.body.innerText || '').slice(0, 100000),
+          watchLinks: [...document.querySelectorAll('a[href]')].flatMap(anchor => {
+            try {
+              const url = new URL(anchor.href);
+              if (!['www.youtube.com', 'music.youtube.com', 'youtube.com'].includes(url.hostname) || url.pathname !== '/watch' || !url.searchParams.has('v')) return [];
+              return [{ videoId: url.searchParams.get('v'), url: url.href, label: anchor.innerText || anchor.textContent || '' }];
+            } catch { return []; }
+          }) };
+        status.textContent = template ? 'Captured a history read. JSON saved.' : 'No supported read observed. JSON saved for inspection.';
+      });
+    } catch (error) { capture.status = 'stopped'; capture.error = String(error); report.errors.push(String(error)); status.textContent = String(error); }
+    finally { active = null; capture.finishedAt = new Date().toISOString(); busyControls(false); await download(); }
+  };
+  historyButton.onclick = async () => {
+    // A fresh capture supplies this session's private form token. No credentials are
+    // loaded from a report, and the historical filter must come from the server.
+    if (!template) await captureButton.onclick();
+    if (!template || halted || active) return;
+    const probe = report.historicalRecords = { status: 'running', startedAt: new Date().toISOString(),
+      rangeUTC: { start: new Date(range.lo).toISOString(), endExclusive: new Date(range.hi).toISOString() },
+      expectedReferenceMusicCount: 12, requests: [] };
+    const url = new URL(location.href);
+    url.searchParams.delete('jspb'); url.searchParams.set('restrict', 'youtube');
+    url.searchParams.set('min', (BigInt(range.lo) * 1000n).toString());
+    url.searchParams.set('max', (BigInt(range.hi) * 1000n - 1n).toString());
+    try {
+      await runReads([{ label: 'historical/request-schema', url: url.href }],
+        item => item.args ? historyRequest(template, item.args) : new Request(item.url, { credentials: 'same-origin', redirect: 'error', cache: 'no-store' }),
+        probe.requests, (result, item, queue) => {
+          if (result.status !== 200) throw Error(`Historical query HTTP ${result.status}.`);
+          if (!item.args) {
+            const specs = result.response.historyRequests || [];
+            if (specs.length !== 1) throw Error(`Found ${specs.length} historical history-request specifications; no RPC arguments were guessed.`);
+            const args = specs[0].arguments;
+            // An unchanged unbounded filter cannot establish historical semantics.
+            if (JSON.stringify(args[0]) === JSON.stringify([null, ['youtube']])) throw Error('The returned history request has no observed time filter.');
+            probe.observedArguments = args;
+            queue.push({ label: 'historical/history-records', url: template.url, args }); return;
+          }
+          const response = result.response;
+          if (response.errorFrames?.length || response.payloads?.length !== 1) throw Error('The historical RPC returned errors or an unknown envelope.');
+          const page = historyPage(response.payloads[0]);
+          const min = BigInt(range.lo) * 1000n, max = BigInt(range.hi) * 1000n;
+          if ((response.payloads[0][0] || []).some(row => BigInt(row[4]) < min || BigInt(row[4]) >= max)) throw Error('Historical RPC returned rows outside the requested time interval.');
+          probe.page = page;
+          probe.status = 'historical-records-received';
+          probe.repeatRecoveryValidated = false;
+          if (report.reference) probe.referenceComparison = compareReference(page.events.map(event => ({
+            path: `row[${event.sourceRow}]`, epochNanoseconds: (BigInt(event.timestampMicroseconds) * 1000n).toString(), utc: event.timeUTC,
+          })), report.reference.events, range);
+        });
+      status.textContent = `Historical RPC returned ${probe.page?.musicCount || 0} Music records; JSON saved. Repeat recovery still needs validation.`;
+    } catch (error) { probe.status = 'stopped'; probe.error = String(error); status.textContent = String(error); report.errors.push(String(error)); }
+    finally { probe.finishedAt = new Date().toISOString(); await download(); }
+  };
   referenceFile.onchange = async () => {
     try {
       const file = referenceFile.files[0]; if (!file) return;
@@ -606,7 +790,7 @@
     if (XMLHttpRequest.prototype.open === openWrapper) XMLHttpRequest.prototype.open = xhr.open;
     if (XMLHttpRequest.prototype.send === sendWrapper) XMLHttpRequest.prototype.send = xhr.send;
     if (XMLHttpRequest.prototype.setRequestHeader === headerWrapper) XMLHttpRequest.prototype.setRequestHeader = xhr.header;
-    cursorButton.disabled = true; currentButton.disabled = true; probeButton.disabled = true; replayButton.disabled = true;
+    busyControls(false);
     status.textContent = 'Stopped. Network hooks restored; use Download JSON to save captured data.';
   };
   window.myActivityNetwork = { download, stop: stopButton.onclick };

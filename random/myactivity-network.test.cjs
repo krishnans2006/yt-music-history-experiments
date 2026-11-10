@@ -3,9 +3,65 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { bootstrap, decodeBatch, readCalls, describe, serverWatchLinks, parseResponse, probes, pool, sanitized, compareReference, productTimestamp, cursorStep } = require('./myactivity-network.js');
+const { bootstrap, decodeBatch, readCalls, historyPage, historyRequests, historyRequest, describe, serverWatchLinks, parseResponse, probes, pool, sanitized, compareReference, productTimestamp, cursorStep } = require('./myactivity-network.js');
 const payload = [['YouTube Music', 'https://music.youtube.com/watch?v=3Yb2-CWjrME', '1733544460123456']];
 const framed = JSON.stringify([['wrb.fr', 'y3VFHd', JSON.stringify(payload), null]]);
+
+function historyRow(id, timestamp, app = 'YouTube Music', action = 'Watched') {
+  const row = Array(33).fill(null);
+  row[4] = timestamp; row[5] = id; row[7] = [app]; row[18] = [app];
+  row[9] = ['Radioactive', null, action, `https://${app === 'YouTube Music' ? 'music' : 'www'}.youtube.com/watch?v=3Yb2-CWjrME`];
+  return row;
+}
+
+test('history records preserve separate repeat observations and exact microseconds, excluding ordinary YouTube', () => {
+  const page = historyPage([[
+    historyRow('first', 1733546200589956), historyRow('repeat', 1733546200589957),
+    historyRow('ordinary-video', 1733546200589958, 'YouTube'),
+    historyRow('not-a-watch', 1733546200589959, 'YouTube Music', 'Searched'),
+  ], 'opaque-next-page']);
+  assert.equal(page.rowCount, 4); assert.equal(page.musicCount, 2);
+  assert.deepEqual(page.events.map(event => event.eventId), ['first', 'repeat']);
+  assert.equal(page.events[0].timeUTC, '2024-12-07T04:36:40.589956Z');
+  assert.equal(page.events[1].timeUTC, '2024-12-07T04:36:40.589957Z');
+  assert.equal(page.events[0].timestampMicroseconds, '1733546200589956');
+  assert.equal(page.events[0].videoId, '3Yb2-CWjrME');
+  assert.equal(page.continuation, 'opaque-next-page'); assert.equal(page.exhausted, false);
+  assert.equal(historyPage([null, null]).exhausted, true);
+  assert.throws(() => historyPage([['unknown row'], null]), /Unrecognized/);
+});
+
+test('literal request maps supply observed arguments without executing downloaded scripts', () => {
+  const args = [['observed-filter'], null, 100];
+  const html = `<script>var AF_dataServiceRequests = {'ds:0':{id:'unrelated',request:[]},'ds:4':{id:'y3VFHd',request:${JSON.stringify(args)}}};</script>`;
+  assert.deepEqual(historyRequests(html), [{ key: 'ds:4', rpc: 'y3VFHd', arguments: args }]);
+  assert.deepEqual(historyRequests('<html>no declarative request map</html>'), []);
+  assert.throws(() => historyRequests("<script>AF_dataServiceRequests={'ds:4':{id:'y3VFHd',request:stealCookies()}}</script>"));
+});
+
+test('historical requests replace only captured read arguments and retain session fields privately', async () => {
+  const form = new URLSearchParams({ at: 'private-token', 'f.req': JSON.stringify([[['y3VFHd', '[[null,["youtube"]],"cursor",100]', null, 'generic']]]) });
+  const template = new Request('https://myactivity.google.com/_/FootprintsMyactivityUi/data/batchexecute?rpcids=y3VFHd', { method: 'POST', body: form });
+  const args = [['observed-filter'], null, 100];
+  const changed = await historyRequest(template, args);
+  const body = new URLSearchParams(await changed.text());
+  assert.equal(body.get('at'), 'private-token');
+  assert.deepEqual(JSON.parse(readCalls(body.toString()).calls[0][1]), args);
+  assert.equal(JSON.parse(readCalls(await template.clone().text()).calls[0][1])[1], 'cursor');
+  assert.equal(changed.credentials, 'same-origin');
+});
+
+const recordReport = path.resolve(__dirname, '../media/myactivity-network-report(3).json');
+test('live captured page contains 100 rows, seven identified Music watches and a distinct continuation', { skip: !fs.existsSync(recordReport) }, () => {
+  const capture = JSON.parse(fs.readFileSync(recordReport, 'utf8')).captures[0];
+  const page = historyPage(capture.response.payloads[0]);
+  assert.equal(page.rowCount, 100); assert.equal(page.musicCount, 7);
+  assert.equal(page.excluded.length, 93);
+  assert.equal(new Set(page.events.map(event => event.eventId)).size, 7);
+  assert(page.events.every(event => event.videoId && event.timeUTC.startsWith('2026-')));
+  assert.equal(page.continuation === capture.calls[0].arguments[1], false);
+  assert.equal(page.exhausted, false);
+});
 
 test('extracts bootstrap data without evaluating scripts or confusing text with object members', () => {
   const data = [['data: [not a member]', { text: "brackets ] } and escaped quote \"" }], ...payload];
@@ -188,4 +244,23 @@ test('empty filtered summaries are retained; missing/invalid timestamp structure
   assert.equal(productTimestamp(parsed), null);
   assert.throws(() => productTimestamp({ activityBlocks: [] }), /missing/);
   assert.throws(() => productTimestamp({ activityBlocks: [{ key: 'ds:5', data: [[[26, 'YouTube', 2, '', [1733546200, 1000000000]]], 1] }] }), /Unrecognized/);
+});
+
+const cursorReport = path.resolve(__dirname, '../media/myactivity-network-report(2).json');
+test('live cursor report independently verifies all twelve bounds, progress and termination', { skip: !fs.existsSync(cursorReport) }, () => {
+  const report = JSON.parse(fs.readFileSync(cursorReport, 'utf8'));
+  const requests = report.cursor.requests, events = report.reference.events, seen = [];
+  assert.equal(requests.length, 14);
+  assert.equal(productTimestamp(requests[0].response), null);
+  for (const request of requests.slice(1)) {
+    assert.equal(request.status, 200);
+    const step = cursorStep(productTimestamp(request.response), request.endpoint.params.min, request.endpoint.params.max, events, seen);
+    if (!step.complete) seen.push(step.referenceIndex);
+    else assert.equal(request, requests.at(-1));
+  }
+  assert.equal(new Set(seen).size, 12);
+  for (let i = 1; i < requests.length - 1; i++) {
+    const timestamp = productTimestamp(requests[i].response);
+    assert.equal(requests[i+1].endpoint.params.max, ((BigInt(timestamp.epochNanoseconds) - 1n) / 1000n).toString());
+  }
 });
