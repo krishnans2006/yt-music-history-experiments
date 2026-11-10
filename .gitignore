@@ -230,3 +230,4 @@ browser.json
 secret.py
 youtube_music_history.json
 myactivity-time-probes*.json
+myactivity-extract-*.json
