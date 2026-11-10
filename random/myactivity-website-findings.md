@@ -86,3 +86,26 @@ With the earlier cutoff, December 7 contains Riptide at 23:23 and BIRDS OF A FEA
 This establishes end-date-dependent presentation for the supplied paired queries. It is consistent with retaining the latest qualifying occurrence per video per UTC day inside the requested interval: the disappearing and replacing pairs are all on December 8 UTC, while the unchanged BIRDS occurrence is on December 7 UTC. The exact grouping stage and stored-event schema remain unverified; this is not a universal implementation claim.
 
 The practical significance is stronger than finding a different snapshot: earlier timestamps are still retrievable by changing the cutoff. A scrape should accumulate records from overlapping end-bounded queries. Daily local cutoffs demonstrably help, but do not establish complete replay recovery: repeated plays inside one local/UTC-day segment may still be consolidated. The highest-value next technical test is whether the observed read request accepts a sub-day upper bound and, if so, whether cutting off before Renegades 22:28 or Radioactive 22:36 exposes the earlier known occurrence. Treat time resolution and exclusive/inclusive boundary handling as measured properties, and avoid creating new timestamps by inference.
+
+**Sub-day URL experiment succeeded, November 10, 2026.** The user ran the browser collector and supplied `media/myactivity-time-probes.json`. All eight probes finished with one stable snapshot each. Requested and final URLs match, including the exact numeric bounds. Seven pages show the explicit end-of-results marker; the remaining page explicitly says "No results." The results demonstrate effective sub-day filtering, rather than merely changed filter labels. The evidence establishes behavior at minute-scale boundaries, not yet second/microsecond precision.
+
+| Recording / Chicago date | Requested interval, UTC | Displayed local result |
+|---|---|---|
+| Renegades / Nov 11, 2024 | Nov 12 04:20–04:30 | 22:28 |
+| Renegades / Nov 11, 2024 | Nov 12 04:20–04:26 | **22:24** |
+| Renegades / Nov 11, 2024 | Nov 12 04:26–04:30 | 22:28 |
+| Renegades / Nov 11, 2024 | Nov 12 04:26–04:27 | **No results** |
+| Radioactive / Dec 6, 2024 | Dec 7 04:00–04:40 | 22:36 |
+| Radioactive / Dec 6, 2024 | Dec 7 04:00–04:10 | **22:08** |
+| Radioactive / Dec 6, 2024 | Dec 7 04:30–04:40 | 22:36 |
+| Radioactive / Dec 6, 2024 | Dec 7 04:10–04:20 | **22:17** |
+
+For Renegades (`5JhZdu4O2w0`), the narrower upper bound restores the 22:24 occurrence from MyActivity JSON, while the wider result retains 22:28 from HTML. Both source observations remain retrievable from the live service. The negative control returns no results, supporting actual time filtering. This resolves the previous concern that the earlier timestamp might simply have been overwritten and become unretrievable, though it does not establish whether the observations represent completed plays.
+
+For Radioactive (`3Yb2-CWjrME`), 22:08 and 22:17 are **absent from both primary exports** at video/local-minute precision. They are also absent from the shorter watch-history JSON, whose coverage starts later. The nominal control only excluded the two previously known timestamps, 22:02 and 22:36; its 22:17 result is additional in-range activity, not evidence of a failed filter. The early window returns 22:08 instead of the previously expected 22:02, consistent with hiding the earlier occurrence behind a later one inside that window. Testing 22:00–22:04 is a useful next bounded check for the 22:02 observation, but it has not yet been run.
+
+Combining the supplied probes with the source exports now gives at least four distinct Radioactive activity observations in the 22:00–22:40 local interval: 22:02 (JSON), 22:08 (website), 22:17 (website), and 22:36 (JSON/HTML/website). The web-only observations have minute precision; do not assign them invented seconds. The 22:17 card contains two watch anchors for the same video (title and duration), but is **one activity card**, not two listens. Its `3:07` duration is track metadata, not a measured playback duration.
+
+The five distinct Music video/minute observations from the eight probes, their query provenance, and their source-export matches are saved in `media/myactivity-time-probes-analysis.json`. Two of those five observations are additions to all three supplied exports. Neither those five observations nor the four-source-observation Radioactive union is a verified completed-play count.
+
+This elevates My Activity from a speculative supplementary route to the primary technical recovery route to implement. Arbitrary time selection already works through URL parameters for these tests, so request interception is not required merely to supply sub-day bounds. The next phase should automatically enumerate a small known repeat interval using progressively earlier bounds, obtain exact timestamps/event identifiers from Details or underlying responses where available, then scale up with checkpointing and explicit unresolved gaps. Do not advance by a whole minute when only the UI minute is known: that could skip additional events within that minute. Complete repeat-one coverage still requires checking what individual playback events were retained; these pages alone cannot establish loop mode or completed playback.
