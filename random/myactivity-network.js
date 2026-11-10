@@ -142,6 +142,22 @@
       continuation: payload[1] || null, exhausted: !payload[1] };
   }
 
+  function auditHistoryRange(payloads, pageURL) {
+    const url = new URL(pageURL);
+    const minimum = url.searchParams.get('min'), maximum = url.searchParams.get('max');
+    if (minimum === null || maximum === null) return { boundedPage: false };
+    if (!/^\d+$/.test(minimum) || !/^\d+$/.test(maximum) || BigInt(minimum) > BigInt(maximum)) throw Error('Invalid page time bounds.');
+    const pages = payloads.map(historyPage);
+    const times = payloads.flatMap(payload => (payload[0] || []).map(row => BigInt(row[4])));
+    const outside = times.filter(time => time < BigInt(minimum) || time > BigInt(maximum));
+    return { boundedPage: true, minMicroseconds: minimum, maxMicroseconds: maximum,
+      rowCount: times.length, musicCount: pages.reduce((count, page) => count + page.musicCount, 0),
+      outsideRequestedRange: outside.length, allReturnedRowsInRange: outside.length === 0,
+      oldestMicroseconds: times.length ? times.reduce((a,b) => a < b ? a : b).toString() : null,
+      newestMicroseconds: times.length ? times.reduce((a,b) => a > b ? a : b).toString() : null,
+      note: 'Checks the response against the page URL. In-range rows do not by themselves prove complete repeat recovery.' };
+  }
+
   // Initial RPC arguments can be embedded in Google's declarative request map.
   // Decode literal arrays only; never evaluate downloaded JavaScript.
   function historyRequests(html) {
@@ -348,7 +364,7 @@
       referenceInterval: event.timeIntervalUTC, nextMaxUs };
   }
 
-  const core = { OPTIONS, balanced, member, bootstrap, decodeBatch, readCalls, historyPage, historyRequests, historyRequest, describe, serverWatchLinks, parseResponse, probes, pool, sanitized, compareReference, productTimestamp, cursorStep };
+  const core = { OPTIONS, balanced, member, bootstrap, decodeBatch, readCalls, historyPage, auditHistoryRange, historyRequests, historyRequest, describe, serverWatchLinks, parseResponse, probes, pool, sanitized, compareReference, productTimestamp, cursorStep };
   if (typeof module === 'object' && module.exports) { module.exports = core; return; }
   if (location.origin !== origin) throw Error('Run this on My Activity.');
   if (window.myActivityNetwork) throw Error('The network tool is already installed.');
@@ -411,11 +427,12 @@
       throw Error(`HTTP ${statusCode}; stopped without retrying. Review any verification or throttling before another run.`);
     }
   }
-  async function record(request, text, statusCode, durationMs) {
+  async function record(request, text, statusCode, durationMs, sourcePage) {
     if (!recording || report.captures.length >= OPTIONS.maxCaptures) return;
     let read;
     try { read = readCalls(await request.clone().text()); } catch { /* Unknown batch: metadata only. */ }
-    const record = { capturedAt: new Date().toISOString(), endpoint: endpoint(request.url), status: statusCode, durationMs };
+    const record = { capturedAt: new Date().toISOString(), endpoint: endpoint(request.url),
+      sourcePage: endpoint(sourcePage), status: statusCode, durationMs };
     report.captures.push(record);
     if (read?.at) secrets.add(read.at);
     if (read && request.method === 'POST') {
@@ -425,7 +442,10 @@
       });
       try {
         record.response = decodeBatch(text); record.candidates = describe(record.response.payloads, range.lo, range.hi);
-        try { record.historyPages = record.response.payloads.map(historyPage); }
+        try {
+          record.historyPages = record.response.payloads.map(historyPage);
+          record.rangeAudit = auditHistoryRange(record.response.payloads, sourcePage);
+        }
         catch (error) { record.historyParseError = String(error); }
       }
       catch (error) { record.parseError = String(error); }
@@ -437,8 +457,8 @@
       await httpError(statusCode);
     }
   }
-  async function safeRecord(request, response, start) {
-    if (isBatch(request.url)) await record(request, await response.clone().text(), response.status, performance.now() - start);
+  async function safeRecord(request, response, start, sourcePage) {
+    if (isBatch(request.url)) await record(request, await response.clone().text(), response.status, performance.now() - start, sourcePage);
   }
   const fetchWrapper = function(input, init) {
     let request;
@@ -446,9 +466,9 @@
       const url = input instanceof Request ? input.url : String(input);
       if (recording && isBatch(url)) request = new Request(input instanceof Request ? input.clone() : input, init);
     } catch (error) { report.errors.push(`Capture skipped: ${error}`); }
-    const start = performance.now();
+    const start = performance.now(), sourcePage = location.href;
     const response = originalFetch.call(this, input, init);
-    if (recording && request) track(response.then(result => safeRecord(request, result, start)));
+    if (recording && request) track(response.then(result => safeRecord(request, result, start, sourcePage)));
     return response;
   };
   window.fetch = fetchWrapper;
@@ -457,12 +477,12 @@
   function sendWrapper(body) {
     const m = metadata.get(this);
     if (recording && m && isBatch(m.url)) {
-      const start = performance.now();
+      const start = performance.now(), sourcePage = location.href;
       try {
         const request = new Request(m.url, { method: m.method, headers: m.headers, body, credentials: 'same-origin' });
         track(new Promise((resolve, reject) => this.addEventListener('loadend', () => {
           try {
-            if (!this.responseType || this.responseType === 'text') Promise.resolve(record(request, this.responseText, this.status, performance.now() - start)).then(resolve, reject);
+            if (!this.responseType || this.responseType === 'text') Promise.resolve(record(request, this.responseText, this.status, performance.now() - start, sourcePage)).then(resolve, reject);
             else resolve();
           } catch (error) { reject(error); }
         }, { once: true })));
@@ -676,7 +696,7 @@
       .catch(error => { status.textContent = String(error); report.errors.push(String(error)); }).finally(download);
   };
   downloadButton.onclick = download;
-  captureButton.onclick = async () => {
+  captureButton.onclick = async (options = {}) => {
     if (active || halted) return;
     active = new AbortController(); const signal = active.signal;
     busyControls(true);
@@ -721,13 +741,13 @@
         status.textContent = template ? 'Captured a history read. JSON saved.' : 'No supported read observed. JSON saved for inspection.';
       });
     } catch (error) { capture.status = 'stopped'; capture.error = String(error); report.errors.push(String(error)); status.textContent = String(error); }
-    finally { active = null; capture.finishedAt = new Date().toISOString(); busyControls(false); await download(); }
+    finally { active = null; capture.finishedAt = new Date().toISOString(); busyControls(false); if (options.download !== false) await download(); }
   };
   historyButton.onclick = async () => {
     // A fresh capture supplies this session's private form token. No credentials are
     // loaded from a report, and the historical filter must come from the server.
-    if (!template) await captureButton.onclick();
-    if (!template || halted || active) return;
+    if (!template) await captureButton.onclick({ download: false });
+    if (!template || halted || active) { await download(); return; }
     const probe = report.historicalRecords = { status: 'running', startedAt: new Date().toISOString(),
       rangeUTC: { start: new Date(range.lo).toISOString(), endExclusive: new Date(range.hi).toISOString() },
       expectedReferenceMusicCount: 12, requests: [] };

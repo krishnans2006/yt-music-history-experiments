@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { bootstrap, decodeBatch, readCalls, historyPage, historyRequests, historyRequest, describe, serverWatchLinks, parseResponse, probes, pool, sanitized, compareReference, productTimestamp, cursorStep } = require('./myactivity-network.js');
+const { bootstrap, decodeBatch, readCalls, historyPage, auditHistoryRange, historyRequests, historyRequest, describe, serverWatchLinks, parseResponse, probes, pool, sanitized, compareReference, productTimestamp, cursorStep } = require('./myactivity-network.js');
 const payload = [['YouTube Music', 'https://music.youtube.com/watch?v=3Yb2-CWjrME', '1733544460123456']];
 const framed = JSON.stringify([['wrb.fr', 'y3VFHd', JSON.stringify(payload), null]]);
 
@@ -13,6 +13,28 @@ function historyRow(id, timestamp, app = 'YouTube Music', action = 'Watched') {
   row[9] = ['Radioactive', null, action, `https://${app === 'YouTube Music' ? 'music' : 'www'}.youtube.com/watch?v=3Yb2-CWjrME`];
   return row;
 }
+
+test('a bounded page must not make an out-of-range continuation appear historically filtered', () => {
+  const bounded = 'https://myactivity.google.com/product/youtube?min=1733544000000000&max=1733546399999999';
+  const valid = auditHistoryRange([[[historyRow('known', 1733546200589956)], null]], bounded);
+  assert.equal(valid.allReturnedRowsInRange, true);
+  assert.equal(valid.musicCount, 1);
+  const invalid = auditHistoryRange([[[historyRow('recent', 1793716146561957)], 'continuation']], bounded);
+  assert.equal(invalid.allReturnedRowsInRange, false);
+  assert.equal(invalid.outsideRequestedRange, 1);
+  assert.equal(invalid.oldestMicroseconds, '1793716146561957');
+  assert.equal(auditHistoryRange([], 'https://myactivity.google.com/product/youtube').boundedPage, false);
+});
+
+const boundedRequestFile = path.resolve(__dirname, '../media/myactivity-bounded-freq.txt');
+test('supplied bounded f.req is identical to the earlier unbounded continuation and cannot locate a time filter', {
+  skip: !fs.existsSync(boundedRequestFile) || !fs.existsSync(path.resolve(__dirname, '../media/myactivity-network-report(3).json')),
+}, () => {
+  const request = JSON.parse(fs.readFileSync(boundedRequestFile, 'utf8'))[0][0];
+  const old = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../media/myactivity-network-report(3).json'), 'utf8')).captures[0].calls[0];
+  assert.equal(request[0], 'y3VFHd');
+  assert.deepEqual(JSON.parse(request[1]), old.arguments);
+});
 
 test('history records preserve separate repeat observations and exact microseconds, excluding ordinary YouTube', () => {
   const page = historyPage([[
