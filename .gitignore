@@ -223,6 +223,8 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Custom
+random/similarity-report.json
+random/patterns-report.json
 media/
 browser.json
 secret.py
