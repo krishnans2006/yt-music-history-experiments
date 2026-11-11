@@ -1,8 +1,9 @@
 // Pure helpers shared by the standalone browser bundle and offline checks.
-const network = require('./myactivity-network.js');
-const previous = require('./myactivity-extract.js');
-const { bootstrap, decodeBatch, historyPage, productTimestamp } = network;
-const { parseSnapshot, minuteCandidates } = previous;
+const protocol = require('./myactivity-fast-protocol.cjs');
+const {
+  bootstrap, decodeBatch, historyPage, productTimestamp,
+  parseSnapshot, minuteCandidates,
+} = protocol;
 const iso = ms => new Date(ms).toISOString();
 const normalize = s => s.replace(/\s+/g, ' ').trim();
 
@@ -240,6 +241,6 @@ function validateReference(events) {
   return true;
 }
 
-module.exports = { iso, normalize, ...Object.fromEntries(['balanced','member','bootstrap','decodeBatch','sanitized','historyPage','productTimestamp'].map(key => [key, network[key]])),
-  minuteCandidates: previous.minuteCandidates, parseSnapshot: previous.parseSnapshot,
+module.exports = { iso, normalize, ...Object.fromEntries(['balanced','member','bootstrap','decodeBatch','sanitized','historyPage','productTimestamp'].map(key => [key, protocol[key]])),
+  minuteCandidates, parseSnapshot,
   htmlEntities, embeddedHistory, serverSnapshot, nativePage, yearWindows, scopedURL, boundedHistoryArgs, boundedHistoryPage, rpcNative, parsePointSnapshot, popupEvents, recordEvents, robotRules, validateReference, REFERENCE };

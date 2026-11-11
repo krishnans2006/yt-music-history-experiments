@@ -193,7 +193,8 @@ function browser(mode = 'direct', savedTables = null) {
     await button('Validate & export / Resume').onclick();
     return downloads.at(-1);
   };
-  return { context, ready, run, requests, navigations, tables, storage, popups, elements, get output() { return downloads.at(-1); } };
+  return { context, ready, run, requests, navigations, tables, storage, popups, elements,
+    get now() { return now; }, get output() { return downloads.at(-1); } };
 }
 
 (async () => {
@@ -264,7 +265,7 @@ function browser(mode = 'direct', savedTables = null) {
     assert.equal(output.run.diagnostics.lastRPC.minMicroseconds, REFERENCE.lo);
     assert.equal(b.requests.filter(request => request.method === 'POST').length, 1);
     assert.equal(JSON.stringify(output).includes('private-rpc-'), false);
-    if (mode === 'rpc-status8') assert(Number(b.storage.get('yt-music-history-network-cooldown')) > Date.now());
+    if (mode === 'rpc-status8') assert(Number(b.storage.get('yt-music-history-network-cooldown')) > b.now);
   }
   const noProgress = browser('rpc-no-progress'), noProgressOutput = await noProgress.run();
   assert.equal(noProgressOutput.coverage.complete, false);
@@ -311,7 +312,7 @@ function browser(mode = 'direct', savedTables = null) {
   assert.equal(deniedOutput.coverage.complete, false); assert.equal(denied.requests.length, 1);
   const throttle = browser('throttle'), throttleOutput = await throttle.run();
   assert.equal(throttleOutput.coverage.complete, false); assert.equal(throttle.requests.length, 1);
-  assert(Number(throttle.storage.get('yt-music-history-network-cooldown')) > Date.now());
+  assert(Number(throttle.storage.get('yt-music-history-network-cooldown')) > throttle.now);
   const locked = browser('locked'); await locked.run(); assert.equal(locked.requests.length, 0);
   console.log('Passed fast-exporter browser simulation: bounded RPC, inclusive/exclusive endpoints, timestamp ties across pages, credential redaction, native/HTML/popup fallback, live progress, checkpoint upgrade/resume, rollback, ignored bounds, pagination failures, access and throttle stops.');
 })().catch(error => { console.error(error); process.exitCode = 1; });
