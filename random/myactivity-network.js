@@ -133,10 +133,15 @@
       } catch { /* Retain explicit Music rows even if their media URL is unavailable. */ }
       const isMusic = label === 'YouTube Music' || secondaryLabel === 'YouTube Music' || hostname === 'music.youtube.com';
       if (!isMusic || action !== 'Watched') { excluded.push({ index, label, action }); continue; }
+      const videoProgressPercent = row[23]?.[2] ?? null;
+      if (videoProgressPercent !== null && (!Number.isSafeInteger(videoProgressPercent) ||
+          videoProgressPercent < 0 || videoProgressPercent > 100)) throw Error(`Unrecognized video progress in history row ${index}.`);
       events.push({ source: 'myactivity-y3VFHd', sourceRow: index, eventId: row[5],
         timestampMicroseconds: us.toString(), timeUTC, videoId, title, url: url || null,
         app: 'YouTube Music', appEvidence: { label, secondaryLabel, hostname },
         durationLabel: row[23]?.[1] || null,
+        // Saved resume position, not necessarily the portion played by this event.
+        videoProgressPercent,
         channels: (row[32] || []).map(channel => ({ name: channel[1], url: channel[3] })),
         devices: (row[19] || []).map(device => device[0]) });
     }

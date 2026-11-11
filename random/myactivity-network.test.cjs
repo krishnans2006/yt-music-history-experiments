@@ -37,8 +37,10 @@ test('supplied bounded f.req is identical to the earlier unbounded continuation 
 });
 
 test('history records preserve separate repeat observations and exact microseconds, excluding ordinary YouTube', () => {
+  const first = historyRow('first', 1733546200589956);
+  first[23] = ['https://i.ytimg.com/vi/3Yb2-CWjrME/mqdefault.jpg', '3:07', 29];
   const page = historyPage([[
-    historyRow('first', 1733546200589956), historyRow('repeat', 1733546200589957),
+    first, historyRow('repeat', 1733546200589957),
     historyRow('ordinary-video', 1733546200589958, 'YouTube'),
     historyRow('not-a-watch', 1733546200589959, 'YouTube Music', 'Searched'),
   ], 'opaque-next-page']);
@@ -48,9 +50,14 @@ test('history records preserve separate repeat observations and exact microsecon
   assert.equal(page.events[1].timeUTC, '2024-12-07T04:36:40.589957Z');
   assert.equal(page.events[0].timestampMicroseconds, '1733546200589956');
   assert.equal(page.events[0].videoId, '3Yb2-CWjrME');
+  assert.equal(page.events[0].videoProgressPercent, 29);
+  assert.equal(page.events[1].videoProgressPercent, null);
   assert.equal(page.continuation, 'opaque-next-page'); assert.equal(page.exhausted, false);
   assert.equal(historyPage([null, null]).exhausted, true);
   assert.throws(() => historyPage([['unknown row'], null]), /Unrecognized/);
+  const invalidProgress = historyRow('invalid-progress', 1733546200589960);
+  invalidProgress[23] = ['thumbnail', '3:07', 101];
+  assert.throws(() => historyPage([[invalidProgress], null]), /video progress/);
 });
 
 test('literal request maps supply observed arguments without executing downloaded scripts', () => {
