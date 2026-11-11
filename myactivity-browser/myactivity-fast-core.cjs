@@ -227,20 +227,6 @@ function robotRules(text, delayMs = 100) {
     } };
 }
 
-const REFERENCE = {
-  lo: '1733544000000000', hi: '1733546400000000', videoId: '3Yb2-CWjrME',
-  times: ['1733544124299187','1733544313023003','1733544502120717','1733544690577253',
-    '1733544879376791','1733545068156926','1733545256928540','1733545446068647',
-    '1733545633623351','1733545823121966','1733546011812940','1733546200589956'],
-};
-
-function validateReference(events) {
-  const actual = events.map(event => `${event.videoId}:${event.timestampMicroseconds}`).sort();
-  const expected = REFERENCE.times.map(time => `${REFERENCE.videoId}:${time}`).sort();
-  if (JSON.stringify(actual) !== JSON.stringify(expected)) throw Error(`Identity/timestamp validation failed: ${events.length} Music observations, expected the 12 exact Radioactive observations. Full export has not started.`);
-  return true;
-}
-
 module.exports = { iso, normalize, ...Object.fromEntries(['balanced','member','bootstrap','decodeBatch','sanitized','historyPage','productTimestamp'].map(key => [key, protocol[key]])),
   minuteCandidates, parseSnapshot,
-  htmlEntities, embeddedHistory, serverSnapshot, nativePage, yearWindows, scopedURL, boundedHistoryArgs, boundedHistoryPage, rpcNative, parsePointSnapshot, popupEvents, recordEvents, robotRules, validateReference, REFERENCE };
+  htmlEntities, embeddedHistory, serverSnapshot, nativePage, yearWindows, scopedURL, boundedHistoryArgs, boundedHistoryPage, rpcNative, parsePointSnapshot, popupEvents, recordEvents, robotRules };

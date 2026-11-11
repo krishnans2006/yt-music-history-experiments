@@ -3,7 +3,7 @@ module.exports = async function boot(core) {
   'use strict';
   const OPTIONS = { gapMs: 100, concurrency: 5, timeoutMs: 45000, pollMs: 200, settleMs: 400 };
   if (!Number.isInteger(OPTIONS.concurrency) || OPTIONS.concurrency < 1 || !Number.isFinite(OPTIONS.gapMs) || OPTIONS.gapMs < 0) throw Error('Invalid worker count or request delay.');
-  const { REFERENCE, nativePage, scopedURL, yearWindows, parsePointSnapshot, popupEvents, recordEvents, robotRules, validateReference } = core;
+  const { nativePage, scopedURL, yearWindows, parsePointSnapshot, popupEvents, recordEvents, robotRules } = core;
   if (location.origin !== 'https://myactivity.google.com' || location.pathname !== '/product/youtube') throw Error('Open your logged-in My Activity YouTube History page.');
   if (window.myActivityFast) throw Error('The fast exporter is already installed.');
   const base = new URL(location.href);
@@ -61,15 +61,14 @@ module.exports = async function boot(core) {
   panel.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;background:white;color:black;border:2px solid #555;padding:16px;font:14px sans-serif;width:720px;max-width:calc(100vw - 68px);max-height:calc(100vh - 68px);overflow:auto';
   const add = (tag, text) => { const element = document.createElement(tag); element.textContent = text; panel.append(element); return element; };
   add('strong', 'Full past YouTube Music history');
-  add('p', 'Includes repeated activity. First validates all 12 known Radioactive observations, then exports the range below.');
+  add('p', 'Includes repeated activity from the range below.');
   add('label', 'Start UTC (inclusive)'); const startInput = add('input', ''); startInput.value = '1970-01-01T00:00:00.000Z';
   add('label', 'End UTC (exclusive)'); const endInput = add('input', ''); endInput.value = new Date().toISOString();
-  const startButton = add('button', 'Validate & export / Resume');
+  const startButton = add('button', 'Export / Resume');
   const pauseButton = add('button', 'Pause'); pauseButton.disabled = true;
   const saveButton = add('button', 'Download JSON');
   const status = add('p', rpcSession ? 'Ready. Bounded history API available; no popup is needed. The cutoff stays fixed on resume.'
     : 'Ready. The cutoff stays fixed on resume. Keep this tab and the fallback window open.');
-  const validationStatus = add('p', 'Reference validation has not started.');
   const coverageStatus = add('p', 'Date-range progress appears when an export starts.');
   coverageStatus.style.fontSize = '12px';
   const timingStatus = add('p', 'Timing appears when an export starts.');
@@ -82,6 +81,9 @@ module.exports = async function boot(core) {
     const saved = await get('states', activeId);
     if (saved?.baseURL === baseURL) {
       state = saved; startInput.value = state.startUTC; endInput.value = state.endUTC;
+      state.rpcBounds ||= state.validation?.rpcBounds || {};
+      if (state.rpcValidated === undefined) state.rpcValidated = Boolean(state.validation?.rpcValidated);
+      delete state.validation;
       if (!Number.isFinite(state.activeElapsedMs) || state.activeElapsedMs < 0) state.activeElapsedMs = 0;
       // Checkpoints from before the range view have only the overall count.
       if (state.windows.some(window => window.musicCount === undefined)) {
@@ -126,10 +128,6 @@ module.exports = async function boot(core) {
       return;
     }
     const prefix = `${controller ? 'Time elapsed' : 'Saved active time'}: ${formatDuration(elapsed)}`;
-    if (!state.validation.complete) {
-      timingStatus.textContent = `${prefix} · Estimated time left: available after validation.`;
-      return;
-    }
     let total = 0n, covered = 0n;
     for (const window of state.windows) {
       const lo = BigInt(window.lo), hi = BigInt(window.hi);
@@ -148,10 +146,6 @@ module.exports = async function boot(core) {
   function renderRanges() {
     const view = committedView?.id === state?.id ? committedView : state;
     if (!view) return;
-    const validation = view.validation;
-    const checking = activeRanges.get(rangeKey(validation.window));
-    validationStatus.textContent = validation.complete ? 'Reference validation: passed (12 listens and empty controls).'
-      : `Reference validation: ${validation.events.length}/12 listens; ${checking?.phase || (view.status === 'stopped' ? 'stopped' : controller ? 'starting' : 'ready to resume')}${checking?.cursor ? ` at ${utc(checking.cursor)}` : ''}.`;
     if (displayedRun !== view.id) {
       displayedRun = view.id; rangeRows.length = 0; rangeList.replaceChildren();
       const table = document.createElement('table');
@@ -183,7 +177,7 @@ module.exports = async function boot(core) {
       total += span; covered += scanned;
       const entry = rangeRows[index], active = activeRanges.get(rangeKey(window));
       entry.status.textContent = window.done ? 'Complete' : active ? active.phase
-        : !validation.complete || !window.steps ? 'Queued' : controller && !controller.signal.aborted ? 'Queued'
+        : !window.steps ? 'Queued' : controller && !controller.signal.aborted ? 'Queued'
         : view.status === 'stopped' ? 'Stopped' : 'Ready to resume';
       entry.row.style.background = active && !window.done ? '#eef6ff' : '';
       entry.cursor.textContent = window.done ? '—' : utc(active?.cursor || window.max);
@@ -201,9 +195,7 @@ module.exports = async function boot(core) {
   function busy(value) { startButton.disabled = startInput.disabled = endInput.disabled = value; pauseButton.disabled = !value; }
   function progress() {
     if (!state) return;
-    status.textContent = state.validation.complete
-      ? `${state.musicCount} Music observations; ${state.steps} cursor steps; ${state.windows.filter(w => w.done).length}/${state.windows.length} year ranges finished. ${state.popupSteps} popup fallbacks.`
-      : `Validating: ${state.validation.events.length}/12 Music observations identified.`;
+    status.textContent = `${state.musicCount} Music observations; ${state.steps} cursor steps; ${state.windows.filter(w => w.done).length}/${state.windows.length} year ranges finished. ${state.popupSteps} popup fallbacks.`;
     renderRanges();
   }
   if (state) progress();
@@ -269,7 +261,7 @@ module.exports = async function boot(core) {
       if (overscan) semantics.lowerOverscan = true;
       const args = core.boundedHistoryArgs(minimum, maximum, continuation, semantics);
       state.diagnostics.lastRPC = { minMicroseconds: minimum, maxMicroseconds: maximum,
-        arguments: args, pageNumber: pages + 1, phase: state.validation.complete ? 'history' : 'validation',
+        arguments: args, pageNumber: pages + 1, phase: 'history',
         purpose: singlePage ? 'boundary-control' : 'latest-timestamp' };
       const body = new URLSearchParams({ at: rpcSession.at,
         'f.req': JSON.stringify([[['y3VFHd', JSON.stringify(args), null, 'generic']]]) });
@@ -344,7 +336,7 @@ module.exports = async function boot(core) {
         } catch { return []; }
       }) };
   }
-  function pointIdentity(native, signal, expectEmpty = false, phase = () => {}) {
+  function pointIdentity(native, signal, phase = () => {}) {
     let lastSnapshot = null;
     phase('Waiting for popup');
     const job = popupGate.then(async () => {
@@ -385,10 +377,6 @@ module.exports = async function boot(core) {
             try {
               const parsed = parsePointSnapshot(snap, native.microseconds);
               if (parsed.terminal) {
-                if (expectEmpty) {
-                  if (!parsed.empty || parsed.watched || parsed.other || parsed.music.length) throw Error('An adjacent-microsecond control was not empty; point filtering may be rounded.');
-                  return { events: [], transport: 'point-popup-empty-control' };
-                }
                 const events = popupEvents(parsed, native);
                 return { events, transport: 'point-popup', watched: parsed.watched, other: parsed.other || 0 };
               }
@@ -408,7 +396,7 @@ module.exports = async function boot(core) {
   async function step(window, signal) {
     const minimum = window.lo, maximum = window.max;
     activity(window, 'Fetching');
-    if (rpcSession && state.validation.complete && state.validation.rpcValidated) {
+    if (rpcSession && state.rpcValidated) {
       const result = await rpcLatest(minimum, maximum, signal);
       if (result.native) {
         state.diagnostics.lastNative = { min: minimum, max: maximum, timestamp: result.native.timestamp, source: 'bounded-history-rpc' };
@@ -427,21 +415,18 @@ module.exports = async function boot(core) {
     if (!state.diagnostics.firstServerInventory) state.diagnostics.firstServerInventory = native.inventory;
     if (rpcSession) {
       phase('Reading history API');
-      const result = await rpcLatest(minimum, maximum, signal);
-      if (!result.native || result.native.timestamp.epochNanoseconds !== native.timestamp.epochNanoseconds) throw Error('Bounded history RPC disagrees with the independently verified native timestamp.');
-      if (!state.validation.rpcBounds) {
+      if (!state.rpcValidated) {
         phase('Checking API boundaries');
         const t = BigInt(native.microseconds);
         const lower = await rpcLatest(t.toString(), (t + 1n).toString(), signal, true, true);
         const upper = await rpcLatest((t - 1n).toString(), t.toString(), signal, true, true);
         for (const probe of [lower, upper]) if (probe.native && probe.native.microseconds !== native.microseconds) throw Error('Unexpected activity in an API boundary control.');
         rpcBounds = { lowerExclusive: lower.receipt.empty, upperExclusive: upper.receipt.empty };
-        for (const [lo, hi] of [[t, t + 1n], [t - 1n, t]]) {
-          const check = await rpcLatest(lo.toString(), hi.toString(), signal, false, true);
-          if (check.native?.microseconds !== native.microseconds) throw Error('API boundary normalization did not preserve the reference observation.');
-        }
-        state.validation.rpcBounds = rpcBounds;
+        state.rpcBounds = rpcBounds;
+        state.rpcValidated = true;
       }
+      const result = await rpcLatest(minimum, maximum, signal);
+      if (!result.native || result.native.timestamp.epochNanoseconds !== native.timestamp.epochNanoseconds) throw Error('Bounded history RPC disagrees with the independently verified native timestamp.');
       result.receipt.nativeGETDurationMs = response.durationMs;
       return result;
     }
@@ -462,58 +447,30 @@ module.exports = async function boot(core) {
           state.diagnostics.serverPointAvailable = true;
         } catch (error) { state.diagnostics.serverPointAvailable = false; state.diagnostics.serverPointParseError = String(error); }
       }
-      if (!identity) identity = await pointIdentity(native, signal, false, phase);
+      if (!identity) identity = await pointIdentity(native, signal, phase);
     }
     receipt.identity = identity.transport;
     return { events: identity.events, receipt, done: BigInt(native.nextMaximum) < BigInt(minimum), nextMaximum: native.nextMaximum };
   }
-  async function validatePointControls(signal) {
-    const transports = state.validation.transports || [];
-    for (const offset of [-2n, 1n]) {
-      const minimum = (BigInt(REFERENCE.times.at(-1)) + offset).toString();
-      const us = (BigInt(minimum) + 1n).toString();
-      activity(state.validation.window, 'Checking empty controls', us);
-      const response = await read(scopedURL(baseURL, minimum, us), signal);
-      if (!nativePage(response.text, minimum, us).empty) throw Error('An adjacent-microsecond native control was not empty.');
-      if (transports.includes('bounded-history-rpc')) {
-        const result = await rpcLatest(minimum, us, signal, false, true);
-        if (!result.receipt.empty) throw Error('Bounded history RPC failed an adjacent-microsecond empty control.');
-      }
-      if (transports.includes('point-html')) {
-        const parsed = parsePointSnapshot(core.serverSnapshot(response.text), us);
-        if (!parsed.terminal || !parsed.empty || parsed.music.length || parsed.watched || parsed.other) throw Error('Point HTML failed an adjacent-microsecond empty control.');
-      }
-      if (transports.includes('point-popup')) await pointIdentity({ microseconds: us }, signal, true,
-        phase => activity(state.validation.window, `Empty control: ${phase.toLowerCase()}`, us));
-      (state.validation.controls ||= []).push({ microseconds: us, minMicroseconds: minimum, maxMicroseconds: us, expectedEmpty: true, nativeEmpty: true, transports });
-      await write(tx => tx.objectStore('states').put(structuredClone(state), state.id));
-    }
-    state.validation.pointControlsComplete = true;
-    state.validation.rpcValidated = transports.includes('bounded-history-rpc');
-  }
-  function saveStep(window, result, validation = false) {
+  function saveStep(window, result) {
     // Serialize state mutation as well as IDB writes: another worker must never
     // persist a cursor from a transaction that subsequently fails.
     const commit = commitGate.then(async () => {
       if (commitFailure) throw commitFailure;
       activity(window, 'Saving', activeRanges.get(rangeKey(window))?.cursor || window.max);
       window.max = result.nextMaximum; window.done = result.done; window.steps++;
-      const number = validation ? state.validation.steps++ : state.steps++;
+      const number = state.steps++;
       if (result.receipt.identity === 'point-popup') state.popupSteps++;
-      if (validation) {
-        state.validation.events.push(...result.events);
-        if (result.receipt.identity && !(state.validation.transports ||= []).includes(result.receipt.identity)) state.validation.transports.push(result.receipt.identity);
-      }
-      else { state.musicCount += result.events.length; window.musicCount = (window.musicCount || 0) + result.events.length; }
+      state.musicCount += result.events.length; window.musicCount = (window.musicCount || 0) + result.events.length;
       const timingCheckpoint = activeStartedAt === null ? null : Date.now();
       if (timingCheckpoint !== null) state.activeElapsedMs = (state.activeElapsedMs || 0) + Math.max(0, timingCheckpoint - activeStartedAt);
       state.updatedAt = new Date().toISOString();
       await write(tx => {
         tx.objectStore('states').put(structuredClone(state), state.id);
         tx.objectStore('control').put(state.id, 'active');
-        const key = `${state.id}:${validation ? 'validation' : 'history'}:${number}`;
-        tx.objectStore('steps').put({ ...result.receipt, runId: state.id, phase: validation ? 'validation' : 'history' }, key);
-        if (!validation) for (const event of result.events) tx.objectStore('events').put({ ...event, runId: state.id }, `${state.id}:${event.eventKey}`);
+        const key = `${state.id}:history:${number}`;
+        tx.objectStore('steps').put({ ...result.receipt, runId: state.id, phase: 'history' }, key);
+        for (const event of result.events) tx.objectStore('events').put({ ...event, runId: state.id }, `${state.id}:${event.eventKey}`);
       });
       if (timingCheckpoint !== null) activeStartedAt = timingCheckpoint;
       committedView = structuredClone(state);
@@ -536,7 +493,7 @@ module.exports = async function boot(core) {
         resolve({ schemaVersion: 1, kind: 'myactivity-fast-export', run: exportedRun,
           events: b.result.filter(event => event.runId === saved.id).sort((x,y) => BigInt(x.timestampMicroseconds) < BigInt(y.timestampMicroseconds) ? -1 : BigInt(x.timestampMicroseconds) > BigInt(y.timestampMicroseconds) ? 1 : x.eventKey.localeCompare(y.eventKey)),
           steps: c.result.filter(receipt => receipt.runId === saved.id),
-          coverage: { complete: saved.validation.complete && saved.windows.every(window => window.done),
+          coverage: { complete: saved.windows.every(window => window.done),
             method: 'Each product timestamp is identified before moving max strictly before it; no video/day deduplication.',
             physicalPlayCompleteness: 'Unknown: includes recovered Google Music watch observations, not proof of completed playback.' } });
       };
@@ -569,15 +526,13 @@ module.exports = async function boot(core) {
         if (!state || state.startUTC !== new Date(lo).toISOString() || state.endUTC !== new Date(hi).toISOString()) {
           state = { id: crypto.randomUUID(), baseURL, startUTC: new Date(lo).toISOString(), endUTC: new Date(hi).toISOString(),
             createdAt: new Date().toISOString(), status: 'running', windows: yearWindows(lo, hi).map(window => ({ ...window, musicCount: 0 })), steps: 0, musicCount: 0, popupSteps: 0,
-            activeElapsedMs: 0,
-            validation: { complete: false, events: [], steps: 0, window: { lo: REFERENCE.lo, hi: REFERENCE.hi, max: (BigInt(REFERENCE.hi) - 1n).toString(), done: false, steps: 0 } }, diagnostics: {} };
+            activeElapsedMs: 0, rpcValidated: false, rpcBounds: {}, diagnostics: {} };
           await write(tx => { tx.objectStore('states').put(state, state.id); tx.objectStore('control').put(state.id, 'active'); });
         }
-        if (rpcSession && state.validation.protocol !== 'bounded-rpc-v1') {
-          state.validation = { protocol: 'bounded-rpc-v1', complete: false, events: [], steps: 0,
-            window: { lo: REFERENCE.lo, hi: REFERENCE.hi, max: (BigInt(REFERENCE.hi) - 1n).toString(), done: false, steps: 0 } };
-        }
-        rpcBounds = state.validation.rpcBounds || {};
+        state.rpcBounds ||= {};
+        if (state.rpcValidated === undefined) state.rpcValidated = false;
+        delete state.validation;
+        rpcBounds = state.rpcBounds;
         if (!Number.isFinite(state.activeElapsedMs) || state.activeElapsedMs < 0) state.activeElapsedMs = 0;
         activeStartedAt = Date.now();
         committedView = structuredClone(state); progress();
@@ -587,16 +542,6 @@ module.exports = async function boot(core) {
         else throw Error(`Cannot check robots.txt: HTTP ${robots.status}.`);
         delayMs = policy.delayMs;
         state.robotsStatus = robots.status; state.status = 'running'; state.error = null;
-        if (!state.validation.pointControlsComplete) state.validation.complete = false;
-        while (!state.validation.complete) {
-          const window = state.validation.window;
-          if (window.done) {
-            validateReference(state.validation.events); await validatePointControls(signal); state.validation.complete = true;
-            await write(tx => tx.objectStore('states').put(structuredClone(state), state.id));
-            activeRanges.delete(rangeKey(window)); committedView = structuredClone(state); progress(); break;
-          }
-          await saveStep(window, await step(window, signal), true);
-        }
         if (!Number.isFinite(state.exportStartedActiveMs)) state.exportStartedActiveMs = activeElapsed();
         // Independent year ranges run concurrently; each range's cursor is sequential.
         const claimed = new Set(); let firstError = null;

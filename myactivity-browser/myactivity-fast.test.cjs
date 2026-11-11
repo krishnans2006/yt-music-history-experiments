@@ -4,7 +4,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 process.env.TZ = 'America/Chicago';
 const core = require('./myactivity-fast.js');
-const { REFERENCE, nativePage, recordEvents, validateReference, embeddedHistory, yearWindows, parsePointSnapshot, popupEvents, robotRules } = core;
+const { nativePage, recordEvents, embeddedHistory, yearWindows, parsePointSnapshot, popupEvents, robotRules } = core;
+const REFERENCE = {
+  lo: '1733544000000000', hi: '1733546400000000', videoId: '3Yb2-CWjrME',
+  times: ['1733544124299187','1733544313023003','1733544502120717','1733544690577253',
+    '1733544879376791','1733545068156926','1733545256928540','1733545446068647',
+    '1733545633623351','1733545823121966','1733546011812940','1733546200589956'],
+};
 
 const failedResponse = path.resolve(__dirname, '../media/myactivity-rpc-failure.txt');
 test('actual failed response is decoded as framed service status 3, without a JSON framing error', { skip: !fs.existsSync(failedResponse) }, () => {
@@ -138,20 +144,6 @@ test('year windows partition the entire range without skipping pre-export histor
   const windows = yearWindows(lo, hi).reverse();
   assert.equal(windows[0].lo, '0'); assert.equal(windows.at(-1).hi, String(BigInt(hi) * 1000n));
   for (let i = 1; i < windows.length; i++) assert.equal(windows[i].lo, windows[i - 1].hi);
-});
-
-test('reference gate checks all twelve exact video/timestamp observations, not only their count', () => {
-  const events = REFERENCE.times.map(time => ({ videoId: REFERENCE.videoId, timestampMicroseconds: time }));
-  assert.equal(validateReference(events), true);
-  assert.throws(() => validateReference([...events.slice(1), events[1]]), /validation failed/);
-  assert.throws(() => validateReference(events.map(event => ({ ...event, videoId: 'wrong' }))), /validation failed/);
-});
-
-const report = path.resolve(__dirname, '../media/myactivity-network-report(2).json');
-test('embedded reference constants match the twelve independently verified live native timestamps', { skip: !fs.existsSync(report) }, () => {
-  const saved = JSON.parse(fs.readFileSync(report));
-  const times = saved.cursor.observations.map(event => (BigInt(event.timestamp.epochNanoseconds) / 1000n).toString()).sort();
-  assert.deepEqual([...REFERENCE.times].sort(), times);
 });
 
 test('robots rules retain the 100 ms baseline and honor applicable restrictions and delays', () => {

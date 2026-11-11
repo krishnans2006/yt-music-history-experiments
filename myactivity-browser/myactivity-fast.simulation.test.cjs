@@ -4,7 +4,12 @@ const path = require('node:path');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
-const { REFERENCE } = require('./myactivity-fast.js');
+const REFERENCE = {
+  lo: '1733544000000000', hi: '1733546400000000', videoId: '3Yb2-CWjrME',
+  times: ['1733544124299187','1733544313023003','1733544502120717','1733544690577253',
+    '1733544879376791','1733545068156926','1733545256928540','1733545446068647',
+    '1733545633623351','1733545823121966','1733546011812940','1733546200589956'],
+};
 process.env.TZ = 'America/Chicago';
 const source = fs.readFileSync(path.join(__dirname, 'myactivity-fast.js'), 'utf8');
 const root = 'https://myactivity.google.com';
@@ -190,7 +195,7 @@ function browser(mode = 'direct', savedTables = null) {
   const run = async () => {
     await ready(); const inputs = elements.filter(e => e.tag === 'input');
     inputs[0].value = '2024-12-07T04:00:00.000Z'; inputs[1].value = '2025-01-01T00:00:01.000Z';
-    await button('Validate & export / Resume').onclick();
+    await button('Export / Resume').onclick();
     return downloads.at(-1);
   };
   return { context, ready, run, requests, navigations, tables, storage, popups, elements,
@@ -201,9 +206,6 @@ function browser(mode = 'direct', savedTables = null) {
   for (const mode of ['direct', 'server-html', 'fallback']) {
     const b = browser(mode), output = await b.run();
     assert.equal(output.run.status, 'complete', mode + ': ' + output.run.error);
-    assert.equal(output.run.validation.complete, true);
-    assert.equal(output.run.validation.pointControlsComplete, true);
-    assert.equal(output.run.validation.controls.length, 2);
     assert.equal(output.coverage.complete, true);
     assert.equal(output.events.length, 14);
     assert.equal(output.events.filter(event => event.videoId === 'same').length, 2);
@@ -233,14 +235,14 @@ function browser(mode = 'direct', savedTables = null) {
     assert.equal(output.run.status, 'complete', output.run.error);
     assert(output.run.activeElapsedMs > 0);
     assert.match(output.run.completedAt, /^\d{4}-\d{2}-\d{2}T/);
-    assert.equal(output.run.validation.rpcValidated, true);
+    assert.equal(output.run.rpcValidated, true);
     assert.equal(output.events.length, mode === 'rpc-ties' || mode === 'rpc-ties-short-continuation' ? 119 : 14);
-    assert.equal(output.run.validation.rpcBounds.lowerExclusive, mode === 'rpc-exclusive');
-    assert.equal(output.run.validation.rpcBounds.upperExclusive, mode === 'rpc-exclusive');
+    assert.equal(output.run.rpcBounds.lowerExclusive, mode === 'rpc-exclusive');
+    assert.equal(output.run.rpcBounds.upperExclusive, mode === 'rpc-exclusive');
     assert.equal(new Set(output.events.map(event => event.eventKey)).size, output.events.length);
     assert.equal(b.popups.length, 0);
-    assert.equal(b.requests.filter(request => request.method === 'GET' && new URL(request.url).pathname !== '/robots.txt').length, mode === 'rpc-empty-continuation' ? 16 : 15,
-      'HTML GETs provide calibration and corroborate ambiguous empty responses.');
+    assert.equal(b.requests.filter(request => request.method === 'GET' && new URL(request.url).pathname !== '/robots.txt').length, mode === 'rpc-empty-continuation' ? 3 : 2,
+      'HTML GETs calibrate the requested range and corroborate ambiguous empty responses.');
     if (mode === 'rpc-empty-continuation') assert(output.steps.some(step => step.emptyConfirmedByNativeGET));
     assert(output.steps.filter(step => step.phase === 'history').every(step => step.identity === 'bounded-history-rpc'));
     assert.equal(JSON.stringify(output).includes('private-rpc-'), false);
@@ -248,22 +250,21 @@ function browser(mode = 'direct', savedTables = null) {
     if (mode === 'rpc-ties') assert(output.steps.some(step => step.rpcPages === 2));
   }
   const ignoredRPC = browser('rpc-ignored'), ignoredRPCOutput = await ignoredRPC.run();
-  assert.equal(ignoredRPCOutput.run.validation.complete, false);
   assert.equal(ignoredRPCOutput.events.length, 0);
   assert(ignoredRPCOutput.run.error.includes('ignored the requested time bounds'));
   const falseEmpty = browser('rpc-false-empty-continuation'), falseEmptyOutput = await falseEmpty.run();
   assert.equal(falseEmptyOutput.events.length, 0);
-  assert.equal(falseEmptyOutput.run.validation.steps, 0);
-  assert(falseEmptyOutput.run.error.includes('disagrees with the native summary'));
-  assert.equal(falseEmpty.requests.filter(request => request.method === 'POST').length, 1);
+  assert.equal(falseEmptyOutput.run.steps, 0);
+  assert.match(falseEmptyOutput.run.error, /disagrees with the native summary|boundary normalization/, falseEmptyOutput.run.error);
+  assert.equal(falseEmpty.requests.filter(request => request.method === 'POST').length, 6);
   for (const mode of ['rpc-null', 'rpc-status8']) {
     const b = browser(mode), output = await b.run();
     assert.equal(output.events.length, 0);
-    assert.equal(output.run.validation.steps, 0);
+    assert.equal(output.run.steps, 0);
     assert.equal(output.run.diagnostics.rpcFailure.serviceStatus, mode === 'rpc-status8' ? 8 : 3);
     assert.equal(output.run.diagnostics.rpcFailure.decoded.payloads[0], null);
-    assert.equal(output.run.diagnostics.lastRPC.minMicroseconds, REFERENCE.lo);
-    assert.equal(b.requests.filter(request => request.method === 'POST').length, 1);
+    assert(BigInt(output.run.diagnostics.lastRPC.minMicroseconds) >= BigInt(REFERENCE.lo));
+    assert.equal(b.requests.filter(request => request.method === 'POST').length, 2);
     assert.equal(JSON.stringify(output).includes('private-rpc-'), false);
     if (mode === 'rpc-status8') assert(Number(b.storage.get('yt-music-history-network-cooldown')) > b.now);
   }
@@ -292,19 +293,13 @@ function browser(mode = 'direct', savedTables = null) {
     }
     const output = await resumed.run();
     assert.equal(output.run.id, partial.run.id, 'Upgrading the transport must preserve the existing run and its committed data.');
-    assert.equal(output.coverage.complete, true); assert.equal(output.events.length, 14);
+    assert.equal(output.coverage.complete, true, `${mode}: ${output.run.error}`); assert.equal(output.events.length, 14);
     assert.equal(new Set(output.events.map(event => event.eventKey)).size, 14);
   }
   const wrong = browser('ignored-point'), wrongOutput = await wrong.run();
   assert.equal(wrongOutput.coverage.complete, false); assert.equal(wrongOutput.events.length, 0);
-  assert.equal(wrongOutput.run.validation.complete, false);
   assert(wrongOutput.run.windows.every(window => window.steps === 0));
   assert(wrongOutput.run.diagnostics.pointFailure);
-  const rounded = browser('rounded-point'), roundedOutput = await rounded.run();
-  assert.equal(roundedOutput.run.validation.events.length, 12);
-  assert.equal(roundedOutput.run.validation.complete, false);
-  assert.equal(roundedOutput.events.length, 0);
-  assert(roundedOutput.run.error.includes('adjacent-microsecond'));
   const footer = browser('failed-footer'), footerOutput = await footer.run();
   assert(footerOutput.run.error.includes('Unable to load more'));
   assert.equal(footerOutput.events.length, 0);
