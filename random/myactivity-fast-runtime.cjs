@@ -1,7 +1,7 @@
 // Browser runtime. build-myactivity-fast.cjs embeds this with the pure helpers.
 module.exports = async function boot(core) {
   'use strict';
-  const OPTIONS = { gapMs: 500, concurrency: 5, timeoutMs: 45000, pollMs: 200, settleMs: 400 };
+  const OPTIONS = { gapMs: 100, concurrency: 5, timeoutMs: 45000, pollMs: 200, settleMs: 400 };
   if (!Number.isInteger(OPTIONS.concurrency) || OPTIONS.concurrency < 1 || !Number.isFinite(OPTIONS.gapMs) || OPTIONS.gapMs < 0) throw Error('Invalid worker count or request delay.');
   const { REFERENCE, nativePage, scopedURL, yearWindows, parsePointSnapshot, popupEvents, recordEvents, robotRules, validateReference } = core;
   if (location.origin !== 'https://myactivity.google.com' || location.pathname !== '/product/youtube') throw Error('Open your logged-in My Activity YouTube History page.');

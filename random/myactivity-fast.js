@@ -375,7 +375,7 @@
   return page.events.map(event => ({ ...event, eventKey: `${event.timestampMicroseconds}:${event.eventId}`,
     evidence: { identity: 'server-embedded-record', nativeTimestamp: native.timestamp.value } }));
 });
-  const robotRules = (function robotRules(text, delayMs = 500) {
+  const robotRules = (function robotRules(text, delayMs = 100) {
   if (/<(?:!doctype|html|form)\b/i.test(text)) throw Error('robots.txt is not a rules file.');
   const groups = []; let group = { agents: [], rules: [], delay: 0, started: false };
   for (const raw of text.split(/\r?\n/)) {
@@ -421,7 +421,7 @@
   if (typeof module === 'object' && module.exports) { module.exports = core; return; }
   (async function boot(core) {
   'use strict';
-  const OPTIONS = { gapMs: 500, concurrency: 5, timeoutMs: 45000, pollMs: 200, settleMs: 400 };
+  const OPTIONS = { gapMs: 100, concurrency: 5, timeoutMs: 45000, pollMs: 200, settleMs: 400 };
   if (!Number.isInteger(OPTIONS.concurrency) || OPTIONS.concurrency < 1 || !Number.isFinite(OPTIONS.gapMs) || OPTIONS.gapMs < 0) throw Error('Invalid worker count or request delay.');
   const { REFERENCE, nativePage, scopedURL, yearWindows, parsePointSnapshot, popupEvents, recordEvents, robotRules, validateReference } = core;
   if (location.origin !== 'https://myactivity.google.com' || location.pathname !== '/product/youtube') throw Error('Open your logged-in My Activity YouTube History page.');

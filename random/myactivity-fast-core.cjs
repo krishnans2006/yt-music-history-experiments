@@ -189,7 +189,7 @@ function recordEvents(native) {
     evidence: { identity: 'server-embedded-record', nativeTimestamp: native.timestamp.value } }));
 }
 
-function robotRules(text, delayMs = 500) {
+function robotRules(text, delayMs = 100) {
   if (/<(?:!doctype|html|form)\b/i.test(text)) throw Error('robots.txt is not a rules file.');
   const groups = []; let group = { agents: [], rules: [], delay: 0, started: false };
   for (const raw of text.split(/\r?\n/)) {

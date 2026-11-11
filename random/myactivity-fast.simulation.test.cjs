@@ -222,7 +222,7 @@ function browser(mode = 'direct', savedTables = null) {
     assert.equal(b.navigations.length > 0, mode === 'fallback');
     assert(b.requests.every(request => new URL(request.url).pathname !== '/_/FootprintsMyactivityUi/data/batchexecute'));
     assert(b.popups.every(popup => popup.closed));
-    for (let i = 1; i < b.requests.length; i++) assert(b.requests[i].at - b.requests[i - 1].at >= 500);
+    for (let i = 1; i < b.requests.length; i++) assert(b.requests[i].at - b.requests[i - 1].at >= 100);
   }
   for (const mode of ['rpc', 'rpc-metadata', 'rpc-exclusive', 'rpc-reject-equal', 'rpc-ties',
     'rpc-boundary-continuation', 'rpc-short-continuation', 'rpc-ties-short-continuation', 'rpc-empty-continuation']) {

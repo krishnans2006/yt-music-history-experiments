@@ -154,8 +154,8 @@ test('embedded reference constants match the twelve independently verified live 
   assert.deepEqual([...REFERENCE.times].sort(), times);
 });
 
-test('robots rules retain the 500 ms baseline and honor applicable restrictions and delays', () => {
-  assert.equal(robotRules('').delayMs, 500);
+test('robots rules retain the 100 ms baseline and honor applicable restrictions and delays', () => {
+  assert.equal(robotRules('').delayMs, 100);
   const policy = robotRules('User-agent: *\nDisallow: /product\nAllow: /product/youtube\nCrawl-delay: 2');
   assert.equal(policy.delayMs, 2000);
   assert.equal(policy.allows('https://myactivity.google.com/product/youtube?min=1'), true);
