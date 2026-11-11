@@ -1,7 +1,7 @@
 // Pure helpers shared by the standalone browser bundle and offline checks.
 const network = require('./myactivity-network.js');
 const previous = require('./myactivity-extract.js');
-const { bootstrap, historyPage, productTimestamp } = network;
+const { bootstrap, decodeBatch, historyPage, productTimestamp } = network;
 const { parseSnapshot, minuteCandidates } = previous;
 const iso = ms => new Date(ms).toISOString();
 const normalize = s => s.replace(/\s+/g, ' ').trim();
@@ -96,6 +96,53 @@ function scopedURL(base, minimum, maximum) {
   if (url.origin !== 'https://myactivity.google.com' || url.pathname !== '/product/youtube') throw Error('Open the My Activity YouTube History page.');
   url.searchParams.set('min', String(minimum)); url.searchParams.set('max', String(maximum));
   return url.href;
+}
+
+// Verified from Google's current public frontend: bD -> az field 4 -> Oy
+// fields 1/2; $C converts epoch microseconds into seconds/nanoseconds. The
+// ez request carries az at field 1, continuation at 2, and page size at 3.
+function boundedHistoryArgs(minimum, maximum, continuation = null, semantics = {}) {
+  const lo = BigInt(minimum), hi = BigInt(maximum);
+  if (lo < 0n || hi < lo) throw Error('Invalid bounded history RPC interval.');
+  const timestamp = us => {
+    const remainder = (us % 1000000n + 1000000n) % 1000000n;
+    return [Number((us - remainder) / 1000000n), Number(remainder) * 1000];
+  };
+  return [[null, ['youtube'], null, [timestamp(lo - (semantics.lowerExclusive || semantics.lowerOverscan ? 1n : 0n)),
+    timestamp(hi + (semantics.upperExclusive ? 1n : 0n))]], continuation, 100];
+}
+
+function boundedHistoryPage(text, minimum, maximum, options = {}) {
+  const decoded = decodeBatch(text);
+  const failure = decoded.rpcResponses?.find(response => response.statusCode !== null && response.statusCode !== 0);
+  if (failure) {
+    const label = { 3: 'INVALID_ARGUMENT', 7: 'PERMISSION_DENIED', 8: 'RESOURCE_EXHAUSTED', 16: 'UNAUTHENTICATED' }[failure.statusCode];
+    const error = Error(`History RPC failed (${label ? `${label}; ` : ''}service status ${failure.statusCode}); the result is not an empty history page.`);
+    error.rpcStatus = failure.statusCode; throw error;
+  }
+  if (decoded.errorFrames.length || decoded.payloads.length !== 1) throw Error('History RPC returned errors or an unknown envelope.');
+  const raw = decoded.payloads[0];
+  if (!Array.isArray(raw)) throw Error(`History RPC returned ${raw === null ? 'a null result' : `an unexpected ${typeof raw} result`}; no history rows were decoded.`);
+  // These are protobuf fields, not a fixed-length tuple. Optional trailing fields
+  // must not reject otherwise valid rows and the known continuation field.
+  const payload = [raw[0] ?? null, raw[1] ?? null], page = historyPage(payload), rows = payload[0] || [];
+  let previous = BigInt(maximum);
+  for (const row of rows) {
+    const time = BigInt(row[4]);
+    if (time < BigInt(minimum) || time > BigInt(maximum)) throw Error('History RPC ignored the requested time bounds.');
+    if (time > previous) throw Error('History RPC rows are not ordered newest first.');
+    previous = time;
+  }
+  if (!rows.length && page.continuation && !options.allowEmptyContinuation) throw Error('History RPC returned an empty page with a continuation; not treating it as exhausted.');
+  return { rows, continuation: page.continuation };
+}
+
+function rpcNative(microseconds, rows) {
+  const us = BigInt(microseconds);
+  return { microseconds: us.toString(), nextMaximum: (us - 1n).toString(),
+    timestamp: { value: [Number(us / 1000000n), Number(us % 1000000n) * 1000],
+      epochNanoseconds: (us * 1000n).toString(), utc: new Date(Number(us / 1000n)).toISOString().replace(/\.\d{3}Z$/, `.${(us % 1000000n).toString().padStart(6, '0')}000Z`) },
+    exactRecords: rows.map(row => ({ row })) };
 }
 
 function parsePointSnapshot(snapshot, microseconds) {
@@ -193,6 +240,6 @@ function validateReference(events) {
   return true;
 }
 
-module.exports = { iso, normalize, ...Object.fromEntries(['balanced','member','bootstrap','historyPage','productTimestamp'].map(key => [key, network[key]])),
+module.exports = { iso, normalize, ...Object.fromEntries(['balanced','member','bootstrap','decodeBatch','sanitized','historyPage','productTimestamp'].map(key => [key, network[key]])),
   minuteCandidates: previous.minuteCandidates, parseSnapshot: previous.parseSnapshot,
-  htmlEntities, embeddedHistory, serverSnapshot, nativePage, yearWindows, scopedURL, parsePointSnapshot, popupEvents, recordEvents, robotRules, validateReference, REFERENCE };
+  htmlEntities, embeddedHistory, serverSnapshot, nativePage, yearWindows, scopedURL, boundedHistoryArgs, boundedHistoryPage, rpcNative, parsePointSnapshot, popupEvents, recordEvents, robotRules, validateReference, REFERENCE };

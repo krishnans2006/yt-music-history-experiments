@@ -89,16 +89,19 @@
       const frame = balanced(source, i);
       frames.push(JSON.parse(frame.text)); i = frame.end;
     }
-    const payloads = [], errorFrames = [];
+    const payloads = [], errorFrames = [], rpcResponses = [];
     function visit(value) {
       if (!Array.isArray(value)) return;
       if (value[0] === 'wrb.fr' && value[1] === READ_RPC) {
+        const status = value[5];
+        rpcResponses.push({ rpc: value[1], statusCode: Array.isArray(status) && Number.isInteger(status[0]) ? status[0] : null,
+          metadata: value.slice(3) });
         payloads.push(typeof value[2] === 'string' ? JSON.parse(value[2]) : value[2]);
       } else if (value[0] === 'er') errorFrames.push(value);
       else value.forEach(visit);
     }
     frames.forEach(visit);
-    return { payloads, errorFrames };
+    return { payloads, errorFrames, rpcResponses };
   }
 
   function readCalls(formBody) {
@@ -435,6 +438,8 @@
       sourcePage: endpoint(sourcePage), status: statusCode, durationMs };
     report.captures.push(record);
     if (read?.at) secrets.add(read.at);
+    const sessionId = new URL(request.url).searchParams.get('f.sid');
+    if (sessionId) secrets.add(sessionId);
     if (read && request.method === 'POST') {
       record.calls = read.calls.map(call => {
         try { return { rpc: call[0], arguments: JSON.parse(call[1]) }; }
