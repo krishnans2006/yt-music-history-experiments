@@ -181,6 +181,8 @@ function browser(mode = 'direct', savedTables = null) {
     performance: { now: () => now },
     setTimeout(fn, ms) { const id = ++nextTimer; timers.add(id); if (ms < 45000) queueMicrotask(() => { if (timers.delete(id)) { now += ms; fn(); } }); return id; },
     clearTimeout(id) { timers.delete(id); },
+    setInterval() { const id = ++nextTimer; timers.add(id); return id; },
+    clearInterval(id) { timers.delete(id); },
   };
   vm.runInNewContext(source, context);
   const ready = async () => { for (let i = 0; i < 10; i++) { await new Promise(setImmediate); if (context.window.myActivityFast) return; } throw Error('Mount failed.'); };
@@ -228,6 +230,8 @@ function browser(mode = 'direct', savedTables = null) {
     'rpc-boundary-continuation', 'rpc-short-continuation', 'rpc-ties-short-continuation', 'rpc-empty-continuation']) {
     const b = browser(mode), output = await b.run();
     assert.equal(output.run.status, 'complete', output.run.error);
+    assert(output.run.activeElapsedMs > 0);
+    assert.match(output.run.completedAt, /^\d{4}-\d{2}-\d{2}T/);
     assert.equal(output.run.validation.rpcValidated, true);
     assert.equal(output.events.length, mode === 'rpc-ties' || mode === 'rpc-ties-short-continuation' ? 119 : 14);
     assert.equal(output.run.validation.rpcBounds.lowerExclusive, mode === 'rpc-exclusive');

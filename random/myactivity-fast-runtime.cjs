@@ -35,6 +35,7 @@ module.exports = async function boot(core) {
     });
   }
   let controller = null, popup = null, state = null, delayMs = OPTIONS.gapMs;
+  let activeStartedAt = null;
   let committedView = null, displayedRun = null;
   const activeRanges = new Map(), rangeRows = [];
   let policy = { allows: () => true }, gate = Promise.resolve(), popupGate = Promise.resolve();
@@ -71,6 +72,8 @@ module.exports = async function boot(core) {
   const validationStatus = add('p', 'Reference validation has not started.');
   const coverageStatus = add('p', 'Date-range progress appears when an export starts.');
   coverageStatus.style.fontSize = '12px';
+  const timingStatus = add('p', 'Timing appears when an export starts.');
+  timingStatus.style.fontSize = '12px';
   const rangeList = add('div', '');
   rangeList.style.cssText = 'max-height:280px;overflow:auto;border-top:1px solid #ddd';
   document.body.append(panel);
@@ -79,6 +82,7 @@ module.exports = async function boot(core) {
     const saved = await get('states', activeId);
     if (saved?.baseURL === baseURL) {
       state = saved; startInput.value = state.startUTC; endInput.value = state.endUTC;
+      if (!Number.isFinite(state.activeElapsedMs) || state.activeElapsedMs < 0) state.activeElapsedMs = 0;
       // Checkpoints from before the range view have only the overall count.
       if (state.windows.some(window => window.musicCount === undefined)) {
         const events = await new Promise((resolve, reject) => {
@@ -97,6 +101,50 @@ module.exports = async function boot(core) {
   }
   function utc(us) { return new Date(Number(BigInt(us) / 1000n)).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ' UTC'); }
   function rangeKey(window) { return `${window.lo}:${window.hi}`; }
+  function formatDuration(milliseconds) {
+    let seconds = Math.max(0, Math.floor(milliseconds / 1000));
+    const days = Math.floor(seconds / 86400); seconds %= 86400;
+    const hours = Math.floor(seconds / 3600); seconds %= 3600;
+    const minutes = Math.floor(seconds / 60); seconds %= 60;
+    const parts = [];
+    if (days) parts.push(`${days}d`);
+    if (hours || days) parts.push(`${hours}h`);
+    if (minutes || hours || days) parts.push(`${minutes}m`);
+    parts.push(`${seconds}s`);
+    return parts.join(' ');
+  }
+  function activeElapsed() {
+    if (!state) return 0;
+    return (state.activeElapsedMs || 0) +
+      (activeStartedAt === null ? 0 : Math.max(0, Date.now() - activeStartedAt));
+  }
+  function renderTiming() {
+    if (!state) return;
+    const elapsed = activeElapsed();
+    if (state.status === 'complete') {
+      timingStatus.textContent = `Time taken: ${formatDuration(elapsed)} active processing time.`;
+      return;
+    }
+    const prefix = `${controller ? 'Time elapsed' : 'Saved active time'}: ${formatDuration(elapsed)}`;
+    if (!state.validation.complete) {
+      timingStatus.textContent = `${prefix} · Estimated time left: available after validation.`;
+      return;
+    }
+    let total = 0n, covered = 0n;
+    for (const window of state.windows) {
+      const lo = BigInt(window.lo), hi = BigInt(window.hi);
+      let next = window.done ? lo : BigInt(window.max) + 1n;
+      if (next < lo) next = lo; if (next > hi) next = hi;
+      total += hi - lo; covered += hi - next;
+    }
+    const historyElapsed = Math.max(0, elapsed - (state.exportStartedActiveMs ?? elapsed));
+    if (!controller || covered === 0n || historyElapsed < 5000) {
+      timingStatus.textContent = `${prefix} · Estimated time left: ${controller ? 'estimating…' : 'available while running'}.`;
+      return;
+    }
+    const estimate = historyElapsed * Number(total - covered) / Number(covered);
+    timingStatus.textContent = `${prefix} · Estimated time left: about ${formatDuration(estimate)} at the current calendar-coverage rate.`;
+  }
   function renderRanges() {
     const view = committedView?.id === state?.id ? committedView : state;
     if (!view) return;
@@ -145,6 +193,7 @@ module.exports = async function boot(core) {
       entry.covered.title = `Scanned: ${utc(next)} → ${utc(hi)} (end exclusive). Remaining: ${utc(lo)} → ${utc(next)} (end exclusive).`;
     }
     coverageStatus.textContent = `${view.windows.filter(window => window.done).length}/${view.windows.length} ranges complete · ${(Number(covered * 10000n / total) / 100).toFixed(2)}% of calendar time scanned. This is date coverage, not a percentage of listens.`;
+    renderTiming();
   }
   function activity(window, phase, cursor = window.max) {
     activeRanges.set(rangeKey(window), { phase, cursor }); renderRanges();
@@ -158,6 +207,7 @@ module.exports = async function boot(core) {
     renderRanges();
   }
   if (state) progress();
+  setInterval(renderTiming, 1000);
   function abortCheck(signal) { if (signal.aborted) throw Error('Paused.'); }
   function wait(ms, signal) {
     return new Promise((resolve, reject) => {
@@ -455,6 +505,8 @@ module.exports = async function boot(core) {
         if (result.receipt.identity && !(state.validation.transports ||= []).includes(result.receipt.identity)) state.validation.transports.push(result.receipt.identity);
       }
       else { state.musicCount += result.events.length; window.musicCount = (window.musicCount || 0) + result.events.length; }
+      const timingCheckpoint = activeStartedAt === null ? null : Date.now();
+      if (timingCheckpoint !== null) state.activeElapsedMs = (state.activeElapsedMs || 0) + Math.max(0, timingCheckpoint - activeStartedAt);
       state.updatedAt = new Date().toISOString();
       await write(tx => {
         tx.objectStore('states').put(structuredClone(state), state.id);
@@ -463,6 +515,7 @@ module.exports = async function boot(core) {
         tx.objectStore('steps').put({ ...result.receipt, runId: state.id, phase: validation ? 'validation' : 'history' }, key);
         if (!validation) for (const event of result.events) tx.objectStore('events').put({ ...event, runId: state.id }, `${state.id}:${event.eventKey}`);
       });
+      if (timingCheckpoint !== null) activeStartedAt = timingCheckpoint;
       committedView = structuredClone(state);
       if (window.done) activeRanges.delete(rangeKey(window));
       progress();
@@ -478,7 +531,9 @@ module.exports = async function boot(core) {
       const a = tx.objectStore('states').get(state.id), b = tx.objectStore('events').getAll(), c = tx.objectStore('steps').getAll();
       tx.oncomplete = () => {
         const saved = a.result;
-        resolve({ schemaVersion: 1, kind: 'myactivity-fast-export', run: saved,
+        const exportedRun = structuredClone(saved);
+        if (state?.id === saved.id) exportedRun.activeElapsedMs = activeElapsed();
+        resolve({ schemaVersion: 1, kind: 'myactivity-fast-export', run: exportedRun,
           events: b.result.filter(event => event.runId === saved.id).sort((x,y) => BigInt(x.timestampMicroseconds) < BigInt(y.timestampMicroseconds) ? -1 : BigInt(x.timestampMicroseconds) > BigInt(y.timestampMicroseconds) ? 1 : x.eventKey.localeCompare(y.eventKey)),
           steps: c.result.filter(receipt => receipt.runId === saved.id),
           coverage: { complete: saved.validation.complete && saved.windows.every(window => window.done),
@@ -514,6 +569,7 @@ module.exports = async function boot(core) {
         if (!state || state.startUTC !== new Date(lo).toISOString() || state.endUTC !== new Date(hi).toISOString()) {
           state = { id: crypto.randomUUID(), baseURL, startUTC: new Date(lo).toISOString(), endUTC: new Date(hi).toISOString(),
             createdAt: new Date().toISOString(), status: 'running', windows: yearWindows(lo, hi).map(window => ({ ...window, musicCount: 0 })), steps: 0, musicCount: 0, popupSteps: 0,
+            activeElapsedMs: 0,
             validation: { complete: false, events: [], steps: 0, window: { lo: REFERENCE.lo, hi: REFERENCE.hi, max: (BigInt(REFERENCE.hi) - 1n).toString(), done: false, steps: 0 } }, diagnostics: {} };
           await write(tx => { tx.objectStore('states').put(state, state.id); tx.objectStore('control').put(state.id, 'active'); });
         }
@@ -522,6 +578,8 @@ module.exports = async function boot(core) {
             window: { lo: REFERENCE.lo, hi: REFERENCE.hi, max: (BigInt(REFERENCE.hi) - 1n).toString(), done: false, steps: 0 } };
         }
         rpcBounds = state.validation.rpcBounds || {};
+        if (!Number.isFinite(state.activeElapsedMs) || state.activeElapsedMs < 0) state.activeElapsedMs = 0;
+        activeStartedAt = Date.now();
         committedView = structuredClone(state); progress();
         const robots = await read('https://myactivity.google.com/robots.txt', signal, true);
         if ([404, 410].includes(robots.status)) policy = { allows: () => true, delayMs: OPTIONS.gapMs };
@@ -539,6 +597,7 @@ module.exports = async function boot(core) {
           }
           await saveStep(window, await step(window, signal), true);
         }
+        if (!Number.isFinite(state.exportStartedActiveMs)) state.exportStartedActiveMs = activeElapsed();
         // Independent year ranges run concurrently; each range's cursor is sequential.
         const claimed = new Set(); let firstError = null;
         const worker = async () => {
@@ -555,7 +614,8 @@ module.exports = async function boot(core) {
         await Promise.allSettled(Array.from({ length: OPTIONS.concurrency }, worker));
         if (firstError) throw firstError;
         abortCheck(signal);
-        state.status = 'complete';
+        state.activeElapsedMs = activeElapsed(); activeStartedAt = null;
+        state.status = 'complete'; state.completedAt = new Date().toISOString();
         await write(tx => tx.objectStore('states').put(structuredClone(state), state.id));
         status.textContent = `Finished: ${state.musicCount} Music observations, including recovered repeats.`;
       });
@@ -567,6 +627,7 @@ module.exports = async function boot(core) {
         state.diagnostics = { ...state.diagnostics, ...diagnostics };
       }
       if (state) {
+        state.activeElapsedMs = activeElapsed(); activeStartedAt = null;
         state.status = error.message === 'Paused.' ? 'paused' : 'stopped';
         state.error = core.sanitized(String(error), [rpcSession?.at, rpcSession?.sid]);
         await write(tx => tx.objectStore('states').put(structuredClone(state), state.id));
